@@ -12,6 +12,10 @@ from typing import Any, Literal, Self
 
 import httpx
 import pytest
+from pydantic import BaseModel, ValidationError
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
+
 from connector.core.config import ConnectorConfig
 from connector.local.terminal import TerminalBackend
 from connector.runtime_protocol import (
@@ -79,13 +83,12 @@ from connector.server.rpc import (
     sanitize_rpc_log_value,
 )
 from connector.server.runtime_sync import (
+    TIMELINE_INGEST_MAX_BYTES,
     RuntimeSyncRunner,
+    _ingest_payload_size,
     _timeline_sync_notification,
     validation_error_summary,
 )
-from pydantic import BaseModel, ValidationError
-from websockets.exceptions import ConnectionClosedError
-from websockets.frames import Close
 
 
 def test_runtime_sync_validation_error_summary_is_bounded() -> None:
@@ -1063,6 +1066,178 @@ def test_runtime_scanner_keeps_turn_markers_out_of_server_timeline() -> None:
     notification = _timeline_sync_notification(snapshot)
 
     assert [item["id"] for item in notification["params"]["items"]] == ["message_1"]
+
+
+def test_runtime_sync_splits_oversized_timeline_by_request_bytes() -> None:
+    from unittest.mock import AsyncMock
+
+    async def run() -> None:
+        payload = "x" * (TIMELINE_INGEST_MAX_BYTES // 2 + 4096)
+        commit = AsyncMock()
+
+        class Runtime(FakeAgentRuntime):
+            async def prepare_session_timeline_sync(
+                self,
+                session_id,
+                external_session_id,
+            ):
+                snapshot = RuntimeTimelineSnapshot(
+                    session_id=session_id,
+                    external_session_id=external_session_id,
+                    runtime=self.runtime_id,
+                    items=tuple(
+                        RuntimeTimelineItem(
+                            id=f"item_{index}",
+                            session_id=session_id,
+                            type="message",
+                            status="done",
+                            order_seq=index,
+                            content_hash=f"sha256:{index}",
+                            role="assistant",
+                            content={"kind": "markdown", "text": payload},
+                            source={"runtime": self.runtime_id, "event": "test"},
+                        )
+                        for index in range(1, 4)
+                    ),
+                )
+                return PreparedSessionTimelineSync(snapshot=snapshot, commit=commit)
+
+        runtime = Runtime()
+        batches: list[list[dict[str, Any]]] = []
+
+        async def ingest(notifications: list[dict[str, Any]]) -> None:
+            batches.append(notifications)
+
+        runner = RuntimeSyncRunner(
+            config=_client().config,
+            supervisor=FakeRuntimeSupervisor(runtime),
+            host=RecordingRuntimeHost(),
+            preferences_reader=dict,
+            send_notification=unused_notification_sender,
+            ingest_notifications=ingest,
+        )
+        session = SessionMeta(
+            session_id="sess_large",
+            external_session_id="thread_large",
+            runtime="codex",
+            metadata={"sync": {"changed": True, "requires_timeline_sync": True}},
+        )
+
+        await runner.sync_existing_session(runtime, session)
+
+        assert [[item["method"] for item in batch] for batch in batches] == [
+            ["session.meta.upsert"],
+            ["timeline.sync"],
+            ["timeline.sync"],
+            ["timeline.sync"],
+            ["session.state.updated", "notice.upsert"],
+        ]
+        timeline_batches = [
+            batch for batch in batches if batch[0]["method"] == "timeline.sync"
+        ]
+        assert [
+            item["id"]
+            for batch in timeline_batches
+            for item in batch[0]["params"]["items"]
+        ] == ["item_1", "item_2", "item_3"]
+        assert all(
+            batch[0]["params"]["complete"] is False
+            for batch in timeline_batches
+        )
+        assert all(
+            _ingest_payload_size(batch) <= TIMELINE_INGEST_MAX_BYTES
+            for batch in batches
+        )
+        commit.assert_awaited_once()
+
+    asyncio.run(run())
+
+
+def test_runtime_sync_resets_then_chunks_complete_timeline_snapshot() -> None:
+    from unittest.mock import AsyncMock
+
+    async def run() -> None:
+        payload = "x" * (TIMELINE_INGEST_MAX_BYTES // 2 + 4096)
+        commit = AsyncMock()
+
+        class Runtime(FakeAgentRuntime):
+            async def prepare_session_timeline_sync(
+                self,
+                session_id,
+                external_session_id,
+            ):
+                snapshot = RuntimeTimelineSnapshot(
+                    session_id=session_id,
+                    external_session_id=external_session_id,
+                    runtime=self.runtime_id,
+                    complete=True,
+                    items=tuple(
+                        RuntimeTimelineItem(
+                            id=f"item_{index}",
+                            session_id=session_id,
+                            type="message",
+                            status="done",
+                            order_seq=index,
+                            content_hash=f"sha256:{index}",
+                            role="assistant",
+                            content={"kind": "markdown", "text": payload},
+                            source={"runtime": self.runtime_id, "event": "test"},
+                        )
+                        for index in range(1, 3)
+                    ),
+                )
+                return PreparedSessionTimelineSync(snapshot=snapshot, commit=commit)
+
+        runtime = Runtime()
+        batches: list[list[dict[str, Any]]] = []
+
+        async def ingest(notifications: list[dict[str, Any]]) -> None:
+            batches.append(notifications)
+
+        runner = RuntimeSyncRunner(
+            config=_client().config,
+            supervisor=FakeRuntimeSupervisor(runtime),
+            host=RecordingRuntimeHost(),
+            preferences_reader=dict,
+            send_notification=unused_notification_sender,
+            ingest_notifications=ingest,
+        )
+        session = SessionMeta(
+            session_id="sess_replace",
+            external_session_id="thread_replace",
+            runtime="codex",
+            metadata={"sync": {"changed": True, "requires_timeline_sync": True}},
+        )
+
+        await runner.sync_existing_session(runtime, session)
+
+        timeline_batches = [
+            batch for batch in batches if batch[0]["method"] == "timeline.sync"
+        ]
+        assert timeline_batches[0][0]["params"] == {
+            "sessionId": "sess_replace",
+            "runtime": "codex",
+            "externalSessionId": "thread_replace",
+            "items": [],
+            "complete": True,
+            "metadata": {},
+        }
+        assert [
+            item["id"]
+            for batch in timeline_batches[1:]
+            for item in batch[0]["params"]["items"]
+        ] == ["item_1", "item_2"]
+        assert all(
+            batch[0]["params"]["complete"] is False
+            for batch in timeline_batches[1:]
+        )
+        assert all(
+            _ingest_payload_size(batch) <= TIMELINE_INGEST_MAX_BYTES
+            for batch in batches
+        )
+        commit.assert_awaited_once()
+
+    asyncio.run(run())
 
 
 def test_connector_config_saves_and_loads_local_json(tmp_path) -> None:

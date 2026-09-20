@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets
 import time
 from collections.abc import Awaitable, Callable
@@ -37,6 +38,11 @@ ACTIVE_SESSION_SYNC_SKIP_STATUSES: frozenset[RuntimeStatus] = frozenset(
     {"waiting", "pending", "running", "waiting_approval", "stopping"}
 )
 VALIDATION_ERROR_LOG_LIMIT = 5
+# Keep individual HTTP ingest payloads comfortably below common reverse-proxy
+# limits.  The value covers the complete JSON request body, not just timeline
+# item content.  A timeline sync is otherwise sent as one request and a long
+# Codex thread can easily exceed an edge upload limit.
+TIMELINE_INGEST_MAX_BYTES = 4 * 1024 * 1024
 
 
 class RuntimeSyncRunner:
@@ -390,7 +396,36 @@ class RuntimeSyncRunner:
         notifications: list[dict[str, Any]],
     ) -> None:
         if self.ingest_notifications is not None:
-            await self.ingest_notifications(notifications)
+            batches = await _split_oversized_timeline_sync(notifications)
+            if batches is None:
+                await self.ingest_notifications(notifications)
+                return
+            timeline_notification = next(
+                notification
+                for notification in notifications
+                if notification.get("method") == "timeline.sync"
+            )
+            timeline_params = timeline_notification.get("params")
+            timeline_items = (
+                timeline_params.get("items", [])
+                if isinstance(timeline_params, dict)
+                else []
+            )
+            timeline_session_id = (
+                timeline_params.get("sessionId")
+                if isinstance(timeline_params, dict)
+                else None
+            )
+            logger.warning(
+                "splitting oversized timeline sync session_id={} items={} "
+                "requests={} max_bytes={}",
+                timeline_session_id,
+                len(timeline_items) if isinstance(timeline_items, list) else 0,
+                len(batches),
+                TIMELINE_INGEST_MAX_BYTES,
+            )
+            for batch in batches:
+                await self.ingest_notifications(batch)
             return
         for notification in notifications:
             await self.send_notification(
@@ -620,6 +655,120 @@ def _timeline_sync_notification(
             }
         ),
     }
+
+
+def _ingest_payload_size(notifications: list[dict[str, Any]]) -> int:
+    """Return the byte size httpx will send for an ingest request body."""
+    return _json_encoded_size({"notifications": notifications})
+
+
+def _json_encoded_size(value: Any) -> int:
+    """Return the UTF-8 JSON encoding size used by httpx's ``json=`` body."""
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+
+
+async def _split_oversized_timeline_sync(
+    notifications: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]] | None:
+    """Split one oversized timeline snapshot into byte-bounded HTTP requests.
+
+    ``complete: false`` is the server's additive timeline operation, so every
+    data-bearing chunk uses it.  A complete snapshot first issues an empty
+    reset request, then rehydrates the timeline through those additive chunks.
+    This preserves replacement semantics without ever sending the full history
+    in one body.
+    """
+    timeline_indexes = [
+        index
+        for index, notification in enumerate(notifications)
+        if notification.get("method") == "timeline.sync"
+    ]
+    if len(timeline_indexes) != 1:
+        return None
+    timeline_index = timeline_indexes[0]
+    timeline = notifications[timeline_index]
+    params = timeline.get("params")
+    if not isinstance(params, dict):
+        return None
+    items = params.get("items")
+    if not isinstance(items, list) or not items:
+        return None
+
+    before = notifications[:timeline_index]
+    after = notifications[timeline_index + 1 :]
+    chunk_params = dict(params)
+    chunk_params["complete"] = False
+    chunk_params["items"] = []
+
+    empty_chunk = {"method": "timeline.sync", "params": chunk_params}
+    empty_chunk_size = _ingest_payload_size([empty_chunk])
+    chunks: list[list[Any]] = []
+    current: list[Any] = []
+    current_size = empty_chunk_size
+    for index, item in enumerate(items, start=1):
+        item_size = _json_encoded_size(item)
+        separator_size = 1 if current else 0
+        if current and (
+            current_size + separator_size + item_size
+            > TIMELINE_INGEST_MAX_BYTES
+        ):
+            chunks.append(current)
+            current = []
+            current_size = empty_chunk_size
+            separator_size = 0
+        if current_size + separator_size + item_size > TIMELINE_INGEST_MAX_BYTES:
+            item_id = item.get("id") if isinstance(item, dict) else None
+            raise RuntimeError(
+                "timeline item exceeds the connector ingest payload limit "
+                f"session_id={params.get('sessionId')} item_id={item_id} "
+                f"max_bytes={TIMELINE_INGEST_MAX_BYTES}"
+            )
+        current.append(item)
+        current_size += separator_size + item_size
+        # Projecting large Codex histories can contain tens of thousands of
+        # items. Yielding here keeps the WebSocket ping task responsive while
+        # the CPU-bound JSON sizing work progresses.
+        if index % 8 == 0:
+            await asyncio.sleep(0)
+    if current:
+        chunks.append(current)
+
+    # Retain the existing one-request behavior unless the timeline itself, or
+    # the surrounding session notifications, exceeds the body budget.
+    if len(chunks) == 1 and _ingest_payload_size(notifications) <= TIMELINE_INGEST_MAX_BYTES:
+        return None
+
+    batches: list[list[dict[str, Any]]] = []
+    if before:
+        batches.append(before)
+    if params.get("complete") is True:
+        batches.append(
+            [
+                {
+                    "method": "timeline.sync",
+                    "params": {**chunk_params, "complete": True, "items": []},
+                }
+            ]
+        )
+    batches.extend(
+        [
+            {
+                "method": "timeline.sync",
+                "params": {**chunk_params, "items": chunk},
+            }
+        ]
+        for chunk in chunks
+    )
+    if after:
+        batches.append(after)
+    return batches
 
 
 def _runtime_timeline_item_payload(
