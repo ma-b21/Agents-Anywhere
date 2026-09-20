@@ -1250,6 +1250,12 @@ class FakeApprovalRpc:
         timeout: float = 30,
     ) -> Any:
         self.requests.append((connector_id, method, params, timeout))
+        if method == "session.takeover.set":
+            takeover = params["takeover"]
+            return {
+                "takeover": takeover,
+                "releaseStatus": "retained" if takeover else "released",
+            }
         if method == "session.capabilities":
             return {"capabilitySet": {"revision": 1, "capabilities": [{
                 "capabilityId": "session.interaction.approval", "scope": "session",
@@ -1289,6 +1295,37 @@ class FakeApprovalRpc:
                 ]
             }
         return {"resolved": True}
+
+
+class TakeoverOnlyRpc:
+    """Answer the new takeover RPC without changing the wrapped manager's presence."""
+
+    def __init__(self, manager: Any) -> None:
+        self._manager = manager
+
+    async def is_online(self, connector_id: str) -> bool:
+        return await self._manager.is_online(connector_id)
+
+    async def request(
+        self,
+        connector_id: str,
+        method: str,
+        params: dict[str, Any],
+        *,
+        timeout: float = 30,
+    ) -> Any:
+        if method == "session.takeover.set":
+            takeover = params["takeover"]
+            return {
+                "takeover": takeover,
+                "releaseStatus": "retained" if takeover else "released",
+            }
+        return await self._manager.request(
+            connector_id,
+            method,
+            params,
+            timeout=timeout,
+        )
 
 
 class FakeTerminalRelaySocket:
@@ -1348,6 +1385,7 @@ class FakeLocalRpc:
         self.terminal_relay_messages: list[dict[str, Any]] = []
         self.fail = False
         self.timeout_session_methods: set[str] = set()
+        self.takeover_responses: dict[bool, Any] = {}
 
     async def is_online(self, connector_id: str) -> bool:
         return True
@@ -1390,6 +1428,17 @@ class FakeLocalRpc:
             raise ConnectorRpcError("codex_error", "request gone")
         if method in self.timeout_session_methods:
             raise TimeoutError(f"{method} timed out")
+        if method == "session.takeover.set":
+            takeover = params["takeover"]
+            return self.takeover_responses.get(
+                takeover,
+                {
+                    "runtime": params["runtime"],
+                    "runtimeId": params["runtimeId"],
+                    "takeover": takeover,
+                    "releaseStatus": "retained" if takeover else "released",
+                },
+            )
         if method == "terminal.create":
             terminal_id = params["terminalId"]
             self.terminals[terminal_id] = {
@@ -4140,7 +4189,10 @@ def test_takeover_gates_remote_message_and_rpc(tmp_path):
     read_only_response = client.post(f"/sessions/{session_id}/runtime/messages", headers=headers, json={"content": "hi"})
     assert read_only_response.status_code == 409
 
+    manager = client.app.state.rpc
+    client.app.state.rpc = TakeoverOnlyRpc(manager)
     client.post(f"/sessions/{session_id}/takeover", headers=headers).raise_for_status()
+    client.app.state.rpc = manager
 
     with client.websocket_connect(
         "/connector/ws",
@@ -4156,6 +4208,167 @@ def test_takeover_gates_remote_message_and_rpc(tmp_path):
         online_state = session_view_for_assertions(client, session_id, headers)
         assert online_state["session"]["connectorStatus"] == "online"
         assert online_state["session"]["takeover"] is True
+
+
+@pytest.mark.parametrize("release_status", ["released", "pending"])
+def test_codex_takeover_syncs_connector_before_persisting(tmp_path, release_status):
+    client = make_client(tmp_path)
+    connector_id, _access_token, session_id, headers = create_connector_and_session(client)
+    fake_rpc = FakeLocalRpc()
+    fake_rpc.takeover_responses[False] = {
+        "runtime": "codex",
+        "runtimeId": "codex",
+        "takeover": False,
+        "releaseStatus": release_status,
+    }
+    client.app.state.rpc = fake_rpc
+
+    enabled = client.post(f"/sessions/{session_id}/takeover", headers=headers)
+    assert enabled.status_code == 200, enabled.text
+    disabled = client.delete(f"/sessions/{session_id}/takeover", headers=headers)
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["session"]["takeover"] is False
+
+    takeover_requests = [
+        request for request in fake_rpc.requests if request[1] == "session.takeover.set"
+    ]
+    assert takeover_requests == [
+        (
+            connector_id,
+            "session.takeover.set",
+            {
+                "runtime": "codex",
+                "runtimeId": "codex",
+                "sessionId": session_id,
+                "externalSessionId": f"thr_{connector_id}_demo",
+                "takeover": True,
+            },
+            30,
+        ),
+        (
+            connector_id,
+            "session.takeover.set",
+            {
+                "runtime": "codex",
+                "runtimeId": "codex",
+                "sessionId": session_id,
+                "externalSessionId": f"thr_{connector_id}_demo",
+                "takeover": False,
+            },
+            30,
+        ),
+    ]
+
+
+def test_codex_takeover_resends_unchanged_state_to_connector(tmp_path):
+    client = make_client(tmp_path)
+    _connector_id, _access_token, session_id, headers = create_connector_and_session(client)
+    fake_rpc = FakeLocalRpc()
+    client.app.state.rpc = fake_rpc
+
+    first = client.post(f"/sessions/{session_id}/takeover", headers=headers)
+    second = client.post(f"/sessions/{session_id}/takeover", headers=headers)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert [
+        params["takeover"]
+        for _connector_id, method, params, _timeout in fake_rpc.requests
+        if method == "session.takeover.set"
+    ] == [True, True]
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_status", "expected_code"),
+    [
+        ("offline", 409, None),
+        ("timeout", 504, "takeover_set_timeout"),
+        ("rpc", 502, "unsupported_runtime"),
+        ("invalid", 502, "invalid_takeover_response"),
+    ],
+)
+def test_codex_takeover_does_not_persist_when_connector_rejects(
+    tmp_path,
+    failure,
+    expected_status,
+    expected_code,
+):
+    client = make_client(tmp_path)
+    _connector_id, _access_token, session_id, headers = create_connector_and_session(client)
+
+    class RejectingTakeoverRpc(FakeLocalRpc):
+        async def request(self, connector_id, method, params, *, timeout=30):
+            if method != "session.takeover.set":
+                return await super().request(
+                    connector_id, method, params, timeout=timeout
+                )
+            self.requests.append((connector_id, method, params, timeout))
+            if failure == "offline":
+                raise ConnectorOfflineError("connector is offline")
+            if failure == "timeout":
+                raise TimeoutError("session.takeover.set timed out")
+            if failure == "rpc":
+                raise ConnectorRpcError("unsupported_runtime", "unsupported runtime")
+            return {"takeover": True, "releaseStatus": []}
+
+    fake_rpc = RejectingTakeoverRpc()
+    client.app.state.rpc = fake_rpc
+    response = client.post(f"/sessions/{session_id}/takeover", headers=headers)
+
+    assert response.status_code == expected_status, response.text
+    if expected_code is not None:
+        assert response.json()["detail"]["code"] == expected_code
+    session = asyncio.run(client.app.state.store.get_session(session_id))
+    assert session.takeover is False
+    assert [request[1] for request in fake_rpc.requests] == ["session.takeover.set"]
+
+
+@pytest.mark.parametrize("runtime", ["claude", "dsh"])
+def test_non_codex_takeover_does_not_call_connector_release_rpc(tmp_path, runtime):
+    client = make_client(tmp_path)
+    _connector_id, _access_token, session_id, headers = create_connector_and_session(
+        client, runtime=runtime
+    )
+    fake_rpc = FakeLocalRpc()
+    client.app.state.rpc = fake_rpc
+
+    response = client.post(f"/sessions/{session_id}/takeover", headers=headers)
+
+    assert response.status_code == 200, response.text
+    assert not any(
+        method == "session.takeover.set" for _connector_id, method, _params, _timeout in fake_rpc.requests
+    )
+
+
+def test_codex_takeover_without_external_session_does_not_call_connector_rpc(tmp_path):
+    client = make_client(tmp_path)
+    connector_id, _access_token, _session_id, headers = create_connector_and_session(client)
+    project_id = next(
+        project["id"]
+        for project in client.get("/projects", headers=headers).json()["projects"]
+        if project["connectorId"] == connector_id
+    )
+    session = asyncio.run(
+        client.app.state.store.create_session(
+            connector_id=connector_id,
+            project_id=project_id,
+            user_id=client.get("/auth/me", headers=headers).json()["userId"],
+            runtime="codex",
+            external_session_id=None,
+            title="No external Codex session",
+            cwd="/repo",
+        )
+    )
+    fake_rpc = FakeLocalRpc()
+    client.app.state.rpc = fake_rpc
+
+    response = client.post(f"/sessions/{session.id}/takeover", headers=headers)
+
+    assert response.status_code == 200, response.text
+    assert not any(
+        method == "session.takeover.set"
+        for _connector_id, method, _params, _timeout in fake_rpc.requests
+    )
 
 
 def test_rpc_manager_sends_request_and_matches_response():
@@ -7081,7 +7294,10 @@ def test_connector_can_upsert_discovered_codex_session(tmp_path):
 def test_discovered_codex_session_reuses_existing_external_session(tmp_path):
     client = make_client(tmp_path)
     connector_id, access_token, session_id, headers = create_connector_and_session(client)
+    manager = client.app.state.rpc
+    client.app.state.rpc = TakeoverOnlyRpc(manager)
     client.post(f"/sessions/{session_id}/takeover", headers=headers).raise_for_status()
+    client.app.state.rpc = manager
 
     updated = client.post(
         "/connector/ingest",
@@ -8890,7 +9106,10 @@ def test_session_ws_updates_effective_capabilities_after_takeover(tmp_path):
 
     with client.websocket_connect(f"/sessions/{session_id}/ws?ticket={ticket}") as ws:
         assert ws.receive_json()["type"] == "session.subscribed"
+        manager = client.app.state.rpc
+        client.app.state.rpc = TakeoverOnlyRpc(manager)
         response = client.post(f"/sessions/{session_id}/takeover", headers=headers)
+        client.app.state.rpc = manager
         assert response.status_code == 200, response.text
 
         received = [ws.receive_json() for _ in range(3)]
@@ -9021,6 +9240,7 @@ def test_session_ws_only_pushes_real_capability_change_across_session_updates(
     connector_id, access_token, session_id, headers = create_connector_and_session(
         client
     )
+    client.app.state.rpc = FakeLocalRpc()
     connector_headers = {"Authorization": f"Bearer {access_token}"}
 
     takeover = client.post(f"/sessions/{session_id}/takeover", headers=headers)
@@ -9183,6 +9403,7 @@ def test_session_ws_preserves_same_sequence_presence_a_b_a_transition(tmp_path):
     connector_id, access_token, session_id, headers = create_connector_and_session(
         client
     )
+    client.app.state.rpc = FakeLocalRpc()
     seeded = client.post(
         "/connector/ingest",
         headers={"Authorization": f"Bearer {access_token}"},
@@ -9273,7 +9494,10 @@ def test_session_ws_preserves_rpc_presence_disconnect_and_reconnect_at_same_sequ
     connector_id, _access_token, session_id, headers = create_connector_and_session(
         client
     )
+    manager = client.app.state.rpc
+    client.app.state.rpc = FakeLocalRpc()
     takeover = client.post(f"/sessions/{session_id}/takeover", headers=headers)
+    client.app.state.rpc = manager
     assert takeover.status_code == 200, takeover.text
     ticket = ws_ticket(client, session_id, headers)
 

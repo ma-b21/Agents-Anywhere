@@ -127,6 +127,12 @@ _SESSION_WS_LIVE_PROJECTION_EVENT_TYPES = {
     "session.meta.updated",
 }
 
+_TAKEOVER_SET_TIMEOUT_SECONDS = 30
+_TAKEOVER_RELEASE_STATUSES = {
+    True: {"retained"},
+    False: {"pending", "released"},
+}
+
 
 def validate_session_id_array(payload: list[str]) -> list[str]:
     if len(payload) < 1:
@@ -1158,6 +1164,8 @@ async def enable_takeover(
     try:
         await db.get_session(session_id, user_id=user_id)
         async with timeline_write_buffer.session_fence(session_id):
+            current_session = await db.get_session(session_id, user_id=user_id)
+            await _sync_codex_takeover(current_session, manager, takeover=True)
             session = await db.set_takeover(session_id, True)
         await _publish_session_protocol_update(
             db,
@@ -1190,6 +1198,8 @@ async def disable_takeover(
     try:
         await db.get_session(session_id, user_id=user_id)
         async with timeline_write_buffer.session_fence(session_id):
+            current_session = await db.get_session(session_id, user_id=user_id)
+            await _sync_codex_takeover(current_session, manager, takeover=False)
             session = await db.set_takeover(session_id, False)
         await _publish_session_protocol_update(
             db,
@@ -1203,6 +1213,62 @@ async def disable_takeover(
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="session not found") from None
+
+
+async def _sync_codex_takeover(
+    session: SessionView,
+    manager: ConnectorRpcManager,
+    *,
+    takeover: bool,
+) -> None:
+    """Apply a Codex takeover change before exposing it in platform state."""
+
+    if session.runtime != "codex" or not session.externalSessionId:
+        return
+
+    try:
+        result = await manager.request(
+            session.connectorId,
+            "session.takeover.set",
+            {
+                "runtime": session.runtime,
+                "runtimeId": _session_runtime_id(session),
+                "sessionId": session.id,
+                "externalSessionId": session.externalSessionId,
+                "takeover": takeover,
+            },
+            timeout=_TAKEOVER_SET_TIMEOUT_SECONDS,
+        )
+    except ConnectorOfflineError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "code": "takeover_set_timeout",
+                "message": "connector takeover request timed out",
+            },
+        ) from exc
+    except ConnectorRpcError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"code": exc.code, "message": exc.message or exc.code},
+        ) from exc
+
+    release_status = result.get("releaseStatus") if isinstance(result, dict) else None
+    if (
+        not isinstance(result, dict)
+        or result.get("takeover") is not takeover
+        or not isinstance(release_status, str)
+        or release_status not in _TAKEOVER_RELEASE_STATUSES[takeover]
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "invalid_takeover_response",
+                "message": "connector returned an invalid takeover response",
+            },
+        )
 
 
 # Removed migration route:
