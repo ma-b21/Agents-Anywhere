@@ -30,7 +30,11 @@ from openai_codex.generated.v2_all import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from connector.logging import logger
-from connector.runtime_protocol import RuntimeConfig, RuntimeConflictError, RuntimeInvalidRequestError
+from connector.runtime_protocol import (
+    RuntimeConfig,
+    RuntimeConflictError,
+    RuntimeInvalidRequestError,
+)
 from connector.runtimes.codex.runtime_helpers import soft_codex_unavailable_reason
 from connector.runtimes.codex.sdk.binary import (
     codex_launch_command,
@@ -55,8 +59,9 @@ from connector.runtimes.codex.sdk.runtime_client import (
     CodexThreadListResult,
     CodexThreadReadResult,
     CodexThreadResult,
-    CodexThreadTurnsResult,
     CodexThreadTurnsPage,
+    CodexThreadTurnsResult,
+    CodexThreadUnsubscribeResult,
     CodexTurnResult,
     NotificationHandler,
 )
@@ -99,6 +104,10 @@ class CodexRawThreadReadResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     thread: dict[str, Any]
+
+
+class CodexThreadUnsubscribeResponse(BaseModel):
+    status: str
 
 
 class CodexSdkClient:
@@ -439,6 +448,43 @@ class CodexSdkClient:
         result = await turn.interrupt()
         payload = turn_action_result(result) or turn_ref(turn)
         return CodexTurnResult(turn_id=id_of(turn), payload=payload)
+
+    async def unsubscribe_thread(
+        self,
+        thread_id: str,
+    ) -> CodexThreadUnsubscribeResult:
+        """Unload one native thread and release this app-server's writer lock."""
+
+        await ensure_codex_initialized(self._client)
+        low_level_client = codex_low_level_client(self._client)
+        request = getattr(low_level_client, "request", None)
+        if not callable(request):
+            raise RuntimeInvalidRequestError(
+                "Codex app-server does not support thread/unsubscribe"
+            )
+        try:
+            response = await request(
+                "thread/unsubscribe",
+                {"threadId": thread_id},
+                response_model=CodexThreadUnsubscribeResponse,
+            )
+        except MethodNotFoundError as exc:
+            raise RuntimeInvalidRequestError(
+                "Codex app-server does not support thread/unsubscribe"
+            ) from exc
+        status = getattr(response, "status", None)
+        if not isinstance(status, str) or status not in {
+            "unsubscribed",
+            "notLoaded",
+            "notSubscribed",
+        }:
+            raise RuntimeInvalidRequestError(
+                "Codex app-server returned an invalid thread/unsubscribe response"
+            )
+        self._loaded_thread_ids.discard(thread_id)
+        self._threads.pop(thread_id, None)
+        self._turns.pop(thread_id, None)
+        return CodexThreadUnsubscribeResult(status=status)
 
     async def compact_thread(self, thread_id: str) -> CodexCompactResult:
         await ensure_codex_initialized(self._client)

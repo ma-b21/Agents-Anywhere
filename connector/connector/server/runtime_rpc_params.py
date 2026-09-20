@@ -420,6 +420,27 @@ class SessionInterruptParams:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionTakeoverParams:
+    session_id: str
+    external_session_id: str
+    takeover: bool
+
+    @classmethod
+    def parse(cls, params: dict[str, Any]) -> SessionTakeoverParams:
+        external_session_id = optional_string(params.get("externalSessionId"))
+        if external_session_id is None:
+            raise ValueError("externalSessionId is required")
+        takeover = params.get("takeover")
+        if not isinstance(takeover, bool):
+            raise TypeError("takeover must be a boolean")
+        return cls(
+            session_id=required_session_id(params),
+            external_session_id=external_session_id,
+            takeover=takeover,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SessionCommandsParams:
     session_id: str
     external_session_id: str | None

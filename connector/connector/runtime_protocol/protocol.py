@@ -194,6 +194,17 @@ class AgentRuntime(ABC):
     ) -> RuntimeOperationResult:
         raise RuntimeUnsupportedError("interrupt_session")
 
+    async def set_session_takeover(
+        self,
+        session_id: str,
+        external_session_id: str,
+        takeover: bool,
+    ) -> RuntimeOperationResult:
+        """Apply the platform's write-ownership state to one session."""
+
+        _ = session_id, external_session_id, takeover
+        raise RuntimeUnsupportedError("set_session_takeover")
+
     async def update_session_selections(
         self,
         session_id: str,

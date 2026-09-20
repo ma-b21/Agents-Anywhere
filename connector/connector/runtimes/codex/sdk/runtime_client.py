@@ -120,6 +120,11 @@ class CodexCompactResult:
     payload: Mapping[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class CodexThreadUnsubscribeResult:
+    status: str
+
+
 class CodexRuntimeClient(Protocol):
     async def start(self, handler: NotificationHandler) -> None: ...
     async def stop(self) -> None: ...
@@ -145,6 +150,10 @@ class CodexRuntimeClient(Protocol):
         self,
         request: CodexInterruptTurnRequest,
     ) -> CodexTurnResult: ...
+    async def unsubscribe_thread(
+        self,
+        thread_id: str,
+    ) -> CodexThreadUnsubscribeResult: ...
     async def compact_thread(self, thread_id: str) -> CodexCompactResult: ...
     async def respond(
         self,

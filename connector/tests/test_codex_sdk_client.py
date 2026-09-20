@@ -30,7 +30,11 @@ from openai_codex.models import (
     TurnCompletedNotification,
 )
 
-from connector.runtime_protocol import RuntimeConfig, RuntimeConflictError
+from connector.runtime_protocol import (
+    RuntimeConfig,
+    RuntimeConflictError,
+    RuntimeInvalidRequestError,
+)
 from connector.runtimes.codex.sdk import client as codex_sdk_client
 from connector.runtimes.codex.sdk.binary import LoginShellPathResult
 from connector.runtimes.codex.sdk.client import (
@@ -52,6 +56,39 @@ from connector.runtimes.model_gateway import ModelGateway
 
 def test_codex_sdk_client_delegates_runtime_protocol_methods() -> None:
     asyncio.run(_test_codex_sdk_client_delegates_runtime_protocol_methods())
+
+
+@pytest.mark.parametrize("status", ["unsubscribed", "notLoaded", "notSubscribed"])
+def test_codex_sdk_unsubscribes_thread_and_clears_local_caches(status: str) -> None:
+    async def run() -> None:
+        native = _FakeLowLevelAsyncCodex()
+        native.low_level.unsubscribe_status = status
+        client = CodexSdkClient(native, sdk=_FakeLowLevelSdkModule())
+        client._loaded_thread_ids.add("thread_existing")
+        client._threads["thread_existing"] = SimpleNamespace()
+        client._turns["thread_existing"] = SimpleNamespace()
+
+        result = await client.unsubscribe_thread("thread_existing")
+
+        assert result.status == status
+        assert native.low_level.raw_requests[-1] == (
+            "thread/unsubscribe",
+            {"threadId": "thread_existing"},
+        )
+        assert "thread_existing" not in client._loaded_thread_ids
+        assert "thread_existing" not in client._threads
+        assert "thread_existing" not in client._turns
+
+    asyncio.run(run())
+
+
+def test_codex_sdk_reports_thread_unsubscribe_as_unsupported_without_low_level_client() -> None:
+    async def run() -> None:
+        client = CodexSdkClient(_FakeAsyncCodex())
+        with pytest.raises(RuntimeInvalidRequestError, match="thread/unsubscribe"):
+            await client.unsubscribe_thread("thread_existing")
+
+    asyncio.run(run())
 
 
 def test_codex_sdk_approval_does_not_block_response_reader() -> None:
@@ -938,6 +975,7 @@ class _FakeLowLevelClient:
         self.turn_start_params: list[dict[str, Any]] = []
         self.fail_next_turn_start: Exception | None = None
         self.raw_requests: list[tuple[str, dict[str, Any]]] = []
+        self.unsubscribe_status = "unsubscribed"
 
     async def request(
         self,
@@ -947,6 +985,8 @@ class _FakeLowLevelClient:
         response_model: Any,
     ) -> Any:
         self.raw_requests.append((method, dict(params)))
+        if method == "thread/unsubscribe":
+            return response_model.model_validate({"status": self.unsubscribe_status})
         if method == "thread/read":
             return response_model.model_validate(
                 {

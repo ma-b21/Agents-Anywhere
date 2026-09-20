@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from connector.core.json_kv import JsonKeyValueStore
+from connector.logging import logger
 from connector.runtime_protocol import (
     AgentRuntime,
     PreparedSessionTimelineSync,
@@ -16,11 +18,11 @@ from connector.runtime_protocol import (
     RuntimeIdentity,
     RuntimeModelCatalog,
     RuntimeOperationResult,
-    RuntimeUnsupportedError,
     RuntimePermissionCatalog,
     RuntimeSessionSourceStateCache,
     RuntimeSessionStateCache,
     RuntimeTimelineSnapshot,
+    RuntimeUnsupportedError,
     SessionMeta,
     SessionNotice,
     SessionState,
@@ -76,6 +78,8 @@ class CodexRuntime(AgentRuntime):
         self._timeline = CodexTimelineAccumulator(
             pending_messages=self._pending_messages,
         )
+        self._pending_thread_releases: dict[str, str] = {}
+        self._takeover_lock = asyncio.Lock()
         self._notifications = CodexNotificationProjector(
             host=self.host,
             session_states=self._session_states,
@@ -83,6 +87,7 @@ class CodexRuntime(AgentRuntime):
             active_turn_ids=self._active_turn_ids,
             timeline=self._timeline,
             notices=self._notices,
+            on_terminal_turn=self._release_pending_after_terminal_turn,
         )
         self._lifecycle = CodexRuntimeLifecycle(
             client=self.client,
@@ -340,9 +345,95 @@ class CodexRuntime(AgentRuntime):
         session_id: str,
         reason: str | None = None,
     ) -> RuntimeOperationResult:
-        return await self._turns.interrupt_session(
+        result = await self._turns.interrupt_session(
             session_id=session_id,
             reason=reason,
+        )
+        if result.ok and session_id not in self._active_turn_ids:
+            await self._release_pending_for_session(session_id)
+        return result
+
+    async def set_session_takeover(
+        self,
+        session_id: str,
+        external_session_id: str,
+        takeover: bool,
+    ) -> RuntimeOperationResult:
+        """Retain or relinquish this process's native Codex thread writer."""
+
+        async with self._takeover_lock:
+            if takeover:
+                self._pending_thread_releases.pop(session_id, None)
+                return RuntimeOperationResult(
+                    ok=True,
+                    result={"takeover": True, "releaseStatus": "retained"},
+                )
+            if session_id in self._active_turn_ids:
+                self._pending_thread_releases[session_id] = external_session_id
+                return RuntimeOperationResult(
+                    ok=True,
+                    result={"takeover": False, "releaseStatus": "pending"},
+                )
+            return await self._unsubscribe_session_locked(
+                session_id,
+                external_session_id,
+            )
+
+    async def _release_pending_after_terminal_turn(
+        self,
+        session_id: str,
+        external_session_id: str,
+    ) -> None:
+        try:
+            await self._release_pending_for_session(
+                session_id,
+                external_session_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "codex pending thread release failed session_id={} external_session_id={}",
+                session_id,
+                external_session_id,
+            )
+
+    async def _release_pending_for_session(
+        self,
+        session_id: str,
+        external_session_id: str | None = None,
+    ) -> RuntimeOperationResult | None:
+        async with self._takeover_lock:
+            pending_external_session_id = self._pending_thread_releases.get(session_id)
+            if pending_external_session_id is None:
+                return None
+            if (
+                external_session_id is not None
+                and pending_external_session_id != external_session_id
+            ):
+                return None
+            if session_id in self._active_turn_ids:
+                return None
+            return await self._unsubscribe_session_locked(
+                session_id,
+                pending_external_session_id,
+            )
+
+    async def _unsubscribe_session_locked(
+        self,
+        session_id: str,
+        external_session_id: str,
+    ) -> RuntimeOperationResult:
+        if self.client is None:
+            raise RuntimeUnsupportedError("set_session_takeover")
+        await self.start()
+        result = await self.client.unsubscribe_thread(external_session_id)
+        self._pending_thread_releases.pop(session_id, None)
+        return RuntimeOperationResult(
+            ok=True,
+            result={
+                "takeover": False,
+                "releaseStatus": "released",
+                "unsubscribeStatus": result.status,
+            },
         )
 
     async def update_session_selections(

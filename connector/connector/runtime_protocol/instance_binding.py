@@ -676,6 +676,18 @@ class RuntimeInstance(AgentRuntime):
     ) -> RuntimeOperationResult:
         return await self.native_runtime.interrupt_session(session_id, reason)
 
+    async def set_session_takeover(
+        self,
+        session_id: str,
+        external_session_id: str,
+        takeover: bool,
+    ) -> RuntimeOperationResult:
+        return await self.native_runtime.set_session_takeover(
+            session_id,
+            external_session_id,
+            takeover,
+        )
+
     async def update_session_selections(
         self,
         session_id: str,

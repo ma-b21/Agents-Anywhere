@@ -11,6 +11,7 @@ from connector.server.runtime_rpc_params import (
     SessionCreateParams,
     SessionInterruptParams,
     SessionSelectionUpdateParams,
+    SessionTakeoverParams,
     TurnStartParams,
     TurnSteerParams,
 )
@@ -92,6 +93,19 @@ async def dispatch_session_interrupt(
     result = await runtime.interrupt_session(
         session_id=parsed.session_id,
         reason=parsed.reason,
+    )
+    return operation_result_payload(result)
+
+
+async def dispatch_session_takeover_set(
+    runtime: AgentRuntime,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    parsed = SessionTakeoverParams.parse(params)
+    result = await runtime.set_session_takeover(
+        session_id=parsed.session_id,
+        external_session_id=parsed.external_session_id,
+        takeover=parsed.takeover,
     )
     return operation_result_payload(result)
 

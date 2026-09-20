@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from connector.runtime_protocol import (
@@ -32,6 +33,7 @@ class CodexNotificationProjector:
     active_turn_ids: dict[str, str]
     timeline: CodexTimelineAccumulator
     notices: CodexNoticeRegistry
+    on_terminal_turn: Callable[[str, str], Awaitable[None]] | None = None
     notice_handler: CodexNoticeHandler = field(init=False)
     turn_lifecycle: CodexTurnLifecycleHandler = field(init=False)
     timeline_activity: CodexTimelineActivityHandler = field(init=False)
@@ -119,6 +121,7 @@ class CodexNotificationProjector:
                 request_id=event.request_id,
             )
             return
+        terminal_turn = False
         if event.is_turn_started:
             await self.turn_lifecycle.handle_turn_started(
                 session_id=session_id,
@@ -131,12 +134,14 @@ class CodexNotificationProjector:
                 thread_id=thread_id,
                 event=event,
             )
+            terminal_turn = True
         elif event.is_failed_turn:
             await self.turn_lifecycle.handle_turn_failed(
                 session_id=session_id,
                 thread_id=thread_id,
                 event=event,
             )
+            terminal_turn = True
         item = self.timeline.item_from_event(
             session_id=session_id,
             external_session_id=thread_id,
@@ -159,6 +164,8 @@ class CodexNotificationProjector:
                 status="idle",
                 metadata={"source": "codex.thread/compacted"},
             )
+        if terminal_turn and self.on_terminal_turn is not None:
+            await self.on_terminal_turn(session_id, thread_id)
 
 
 def notification_event(message: CodexNotificationMessage) -> CodexSdkEvent:

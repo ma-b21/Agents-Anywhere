@@ -703,6 +703,30 @@ class FakeAgentRuntime(AgentRuntime):
             result={"interrupted": True, "alreadyStopped": False},
         )
 
+    async def set_session_takeover(
+        self,
+        session_id: str,
+        external_session_id: str,
+        takeover: bool,
+    ) -> RuntimeOperationResult:
+        self.calls.append(
+            (
+                "session.takeover.set",
+                {
+                    "sessionId": session_id,
+                    "externalSessionId": external_session_id,
+                    "takeover": takeover,
+                },
+            )
+        )
+        return RuntimeOperationResult(
+            ok=True,
+            result={
+                "takeover": takeover,
+                "releaseStatus": "retained" if takeover else "released",
+            },
+        )
+
     async def update_session_selections(
         self,
         session_id: str,
@@ -3426,20 +3450,40 @@ async def _exercise_agent_runtime_turn_rpc(tmp_path) -> None:
             "reason": "user",
         },
     )
+    takeover = await client.dispatch(
+        "session.takeover.set",
+        {
+            "runtime": "codex",
+            "sessionId": "sess_1",
+            "externalSessionId": "thr_1",
+            "takeover": False,
+        },
+    )
 
     assert agent_runtime.started is True
     scope = {"runtime": "codex", "runtimeId": "codex"}
     assert started == scope
     assert steered == {**scope, "steered": True}
     assert interrupted == {**scope, "interrupted": True, "alreadyStopped": False}
+    assert takeover == {
+        **scope,
+        "takeover": False,
+        "releaseStatus": "released",
+    }
     assert [call[0] for call in agent_runtime.calls] == [
         "turn.start",
         "turn.steer",
         "session.interrupt",
+        "session.takeover.set",
     ]
     assert agent_runtime.calls[0][1]["attachments"][0].file_id == "file_1"
     assert agent_runtime.calls[0][1]["clientMessageId"] == "cm_1"
     assert agent_runtime.calls[0][1]["cwd"] == "/Users/t4wefan"
+    assert agent_runtime.calls[3][1] == {
+        "sessionId": "sess_1",
+        "externalSessionId": "thr_1",
+        "takeover": False,
+    }
 
 
 async def _exercise_agent_runtime_discovery() -> None:

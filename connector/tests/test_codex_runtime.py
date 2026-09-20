@@ -93,6 +93,7 @@ from connector.runtimes.codex.sdk.runtime_client import (
     CodexThreadReadResult,
     CodexThreadResult,
     CodexThreadTurnsResult,
+    CodexThreadUnsubscribeResult,
     CodexTurnInputAttachment,
     CodexTurnResult,
 )
@@ -520,6 +521,7 @@ class FakeCodexClient:
                     "id": "turn_new",
                 }
             },
+            "thread/unsubscribe": {"status": "unsubscribed"},
             "thread/compact/start": {},
         }
 
@@ -650,6 +652,13 @@ class FakeCodexClient:
         )
         turn = result["turn"]
         return CodexTurnResult(turn_id=turn["id"], payload=turn)
+
+    async def unsubscribe_thread(
+        self,
+        thread_id: str,
+    ) -> CodexThreadUnsubscribeResult:
+        result = self.record_request("thread/unsubscribe", {"threadId": thread_id})
+        return CodexThreadUnsubscribeResult(status=result["status"])
 
     async def compact_thread(self, thread_id: str) -> CodexCompactResult:
         result = self.record_request("thread/compact/start", {"threadId": thread_id})
@@ -4144,6 +4153,84 @@ async def _test_codex_runtime_rejects_unknown_command_without_transport_error() 
     assert result.ok is False
     assert result.code == "unknown_command"
     assert all(request[0] != "turn/start" for request in client.requests)
+
+
+def test_codex_runtime_releases_idle_session_when_takeover_is_disabled() -> None:
+    asyncio.run(_test_codex_runtime_releases_idle_session_when_takeover_is_disabled())
+
+
+async def _test_codex_runtime_releases_idle_session_when_takeover_is_disabled() -> None:
+    client = FakeCodexClient()
+    runtime = CodexRuntime(config=_config(), host=FakeHost(), client=client)
+
+    result = await runtime.set_session_takeover("sess_1", "thread_1", False)
+
+    assert result.ok is True
+    assert result.result == {
+        "takeover": False,
+        "releaseStatus": "released",
+        "unsubscribeStatus": "unsubscribed",
+    }
+    assert client.requests[-1] == ("thread/unsubscribe", {"threadId": "thread_1"})
+
+
+@pytest.mark.parametrize("terminal_method", ["turn/completed", "turn/interrupted", "turn/failed"])
+def test_codex_runtime_defers_release_until_turn_is_terminal(
+    terminal_method: str,
+) -> None:
+    asyncio.run(_test_codex_runtime_defers_release_until_turn_is_terminal(terminal_method))
+
+
+async def _test_codex_runtime_defers_release_until_turn_is_terminal(
+    terminal_method: str,
+) -> None:
+    client = FakeCodexClient()
+    runtime = CodexRuntime(config=_config(), host=FakeHost(), client=client)
+    runtime._active_turn_ids["sess_1"] = "turn_1"
+
+    pending = await runtime.set_session_takeover("sess_1", "thread_1", False)
+
+    assert pending.result == {"takeover": False, "releaseStatus": "pending"}
+    assert all(method != "thread/unsubscribe" for method, _ in client.requests)
+
+    params: dict[str, Any] = {
+        "platformSessionId": "sess_1",
+        "threadId": "thread_1",
+        "turnId": "turn_1",
+    }
+    if terminal_method == "turn/failed":
+        params["error"] = {"message": "failed"}
+    await runtime._handle_notification({"method": terminal_method, "params": params})
+
+    assert client.requests[-1] == ("thread/unsubscribe", {"threadId": "thread_1"})
+    assert runtime._pending_thread_releases == {}
+
+
+def test_codex_runtime_retakeover_cancels_pending_thread_release() -> None:
+    asyncio.run(_test_codex_runtime_retakeover_cancels_pending_thread_release())
+
+
+async def _test_codex_runtime_retakeover_cancels_pending_thread_release() -> None:
+    client = FakeCodexClient()
+    runtime = CodexRuntime(config=_config(), host=FakeHost(), client=client)
+    runtime._active_turn_ids["sess_1"] = "turn_1"
+
+    await runtime.set_session_takeover("sess_1", "thread_1", False)
+    retained = await runtime.set_session_takeover("sess_1", "thread_1", True)
+    await runtime._handle_notification(
+        {
+            "method": "turn/failed",
+            "params": {
+                "platformSessionId": "sess_1",
+                "threadId": "thread_1",
+                "turnId": "turn_1",
+                "error": {"message": "failed"},
+            },
+        }
+    )
+
+    assert retained.result == {"takeover": True, "releaseStatus": "retained"}
+    assert all(method != "thread/unsubscribe" for method, _ in client.requests)
 
 
 def test_codex_runtime_turn_completed_notification_sets_idle() -> None:
