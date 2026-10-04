@@ -773,6 +773,39 @@ export class DashboardApi {
     );
   }
 
+  async steerSessionMessage(
+    token: string,
+    sessionId: string,
+    content: string,
+    options: MessageSendOptions = {},
+  ): Promise<RpcResponse<unknown>> {
+    const { attachments, clientMessageId } = options;
+    const response = await this.client.post<RpcResponse<unknown>>(
+      `/sessions/${encodeURIComponent(sessionId)}/runtime/steer`,
+      {
+        content,
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        ...(clientMessageId ? { clientMessageId } : {}),
+      },
+      { token },
+    );
+    // The RPC envelope can succeed while the runtime rejects the operation.
+    const result = response.result;
+    if (response.ok === false) {
+      throw new Error(response.error?.message || response.error?.code || "Steer request failed");
+    }
+    if (result && typeof result === "object") {
+      const operation = result as { ok?: unknown; steered?: unknown; message?: unknown; code?: unknown; error?: unknown };
+      if (operation.ok === false || operation.steered === false || operation.error != null) {
+        const error = operation.error as { message?: unknown; code?: unknown } | null;
+        const message = [operation.message, error?.message, operation.error, operation.code, error?.code]
+          .find((value): value is string => typeof value === "string" && value.trim().length > 0);
+        throw new Error(message || "Steer request failed");
+      }
+    }
+    return response;
+  }
+
   getSessionRuntimeState(
     token: string,
     sessionId: string,

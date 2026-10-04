@@ -45,6 +45,7 @@ import {
 } from "@/components/session/catalog-selection"
 import { SelectionSettingsDrawer } from "@/components/session/selection-settings-drawer"
 import { CAPABILITY, capabilityIsUsable, findCapability, attachmentMimeTypes } from "@/components/session/capabilities"
+import { sessionMessageAction, type SessionMessageAction } from "@/components/session/session-message-action"
 import { useElementWidth } from "@/hooks/use-element-width"
 import { sessionRuntimeId, sessionRuntimeType } from "@/features/dashboard/runtime-instances"
 
@@ -60,6 +61,7 @@ export function SessionComposer({
   interrupting,
   takeoverBusy,
   value,
+  retryAction,
   effectiveCapabilities,
   modelCatalog,
   permissionCatalog,
@@ -82,6 +84,7 @@ export function SessionComposer({
   interrupting: boolean
   takeoverBusy: boolean
   value: string
+  retryAction?: SessionMessageAction
   effectiveCapabilities: ProtocolCapabilitySet | null
   modelCatalog: ProtocolModelCatalog | null
   permissionCatalog: ProtocolPermissionCatalog | null
@@ -94,6 +97,7 @@ export function SessionComposer({
     content: string,
     attachments: AttachedFile[],
     selections: { model?: string; permission?: string },
+    action: SessionMessageAction,
   ) => Promise<boolean>
   onInterrupt: () => void
   onCommand: (command: string, options: { args: string[]; raw: string }) => void
@@ -104,6 +108,13 @@ export function SessionComposer({
   const composerRef = React.useRef<HTMLDivElement | null>(null)
   const valueRef = React.useRef(value)
   valueRef.current = value
+  const submittingRef = React.useRef(false)
+  const mountedRef = React.useRef(true)
+  const draftRevisionRef = React.useRef(0)
+  React.useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
   const composerWidth = useElementWidth(composerRef)
   const runtimeStatus = effectiveRuntimeStatus(runtimeState, session)
   const runtimeSelections = runtimeState?.selections ?? {}
@@ -128,11 +139,14 @@ export function SessionComposer({
     !sourceUnavailable &&
     !isDisconnected &&
     !isWaiting &&
-    !isRunning &&
     !isStopping &&
     !isWaitingApproval &&
-    !isBlocked
+    !isBlocked &&
+    session.takeover &&
+    pendingInteractionCount === 0
   const canUseSendMessage = capabilityIsUsable(effectiveCapabilities, CAPABILITY.sendMessage, runtimeScope)
+  const canUseSteer = capabilityIsUsable(effectiveCapabilities, CAPABILITY.steer, runtimeScope)
+  const messageAction = sessionMessageAction({ status: runtimeStatus, canSendMessage: canUseSendMessage, canSteer: canUseSteer, retryAction })
   const canUseInterrupt = capabilityIsUsable(effectiveCapabilities, CAPABILITY.interrupt, runtimeScope)
   const interruptCapability = findCapability(effectiveCapabilities, CAPABILITY.interrupt, runtimeScope)
   const canUseModelCatalog = capabilityIsUsable(effectiveCapabilities, CAPABILITY.modelCatalog, runtimeScope)
@@ -161,12 +175,13 @@ export function SessionComposer({
     onDrop,
   } = useAttachments({ sessionId: creatingSession ? undefined : session.id, token, enabled: canUseAttachments, allowedMimeTypes })
   const canSend =
-    canUseSendMessage &&
+    messageAction !== null &&
     !creatingSession &&
     !sending &&
     !interrupting &&
     acceptsUserInput
-  const canRunCommand = !creatingSession && !sending && !interrupting && acceptsUserInput
+  const canRunCommand = !creatingSession && !sending && !interrupting && acceptsUserInput &&
+    (runtimeStatus === "idle" || runtimeStatus === "error")
   const hasInput = value.trim().length > 0 || attachments.length > 0
   const attachmentsReady = attachmentsAllowed && (attachments.length === 0 || (allUploaded && !uploadsPending && !uploadFailed))
   const activeSessionCanInterrupt = Boolean(
@@ -176,6 +191,19 @@ export function SessionComposer({
     (isWaiting || isRunning || isStopping || isWaitingApproval || isBlocked),
   )
   const showInterrupt = !creatingSession && canUseInterrupt && activeSessionCanInterrupt
+  const draftSnapshotRef = React.useRef({ value, attachments })
+  if (draftSnapshotRef.current.value !== value || draftSnapshotRef.current.attachments !== attachments) {
+    draftRevisionRef.current += 1
+    draftSnapshotRef.current = { value, attachments }
+  }
+  const attachmentIdentity = attachments.map((file) => file.id).join("\n")
+  const previousAttachmentsRef = React.useRef(attachmentIdentity)
+  React.useEffect(() => {
+    if (previousAttachmentsRef.current === attachmentIdentity) return
+    previousAttachmentsRef.current = attachmentIdentity
+    // Editing the attachments is a new message, just like editing its text.
+    onValueChange(valueRef.current)
+  }, [attachmentIdentity, onValueChange])
   const [selectedPermissionMode, setSelectedPermissionMode] = React.useState("")
   const [selectedModel, setSelectedModel] = React.useState("")
   const [selectedReasoning, setSelectedReasoning] = React.useState("")
@@ -306,6 +334,8 @@ export function SessionComposer({
         ? tSession("waitingApprovalPlaceholder")
         : isWaiting
           ? tSession("pendingPlaceholder")
+          : isRunning && canUseSteer
+            ? tSession("steerPlaceholder")
           : isStopping || isRunning
             ? tSession("busyPlaceholder")
             : isWaitingApproval || isBlocked
@@ -325,18 +355,20 @@ export function SessionComposer({
   const canSubmitCommand = commandQuery !== null && attachments.length === 0 && canRunCommand
   const canSubmitMessage =
     canSend &&
+    (commandQuery === null || attachments.length > 0) &&
     session.takeover &&
     hasInput &&
     attachmentsReady &&
     (attachments.length === 0 || canUseAttachments)
   const concurrentWriter = runtimeState?.error?.code === "DSH_CONCURRENT_WRITER_DETECTED"
   const updateValue = React.useCallback((nextValue: string) => {
+    draftRevisionRef.current += 1
     valueRef.current = nextValue
     onValueChange(nextValue)
   }, [onValueChange])
 
   const submit = async () => {
-    if (!hasInput) return
+    if (!hasInput || submittingRef.current) return
     const command = commandFromValue(value, commandSuggestions)
     if (commandQuery !== null && attachments.length === 0) {
       if (command && canRunCommand) {
@@ -346,26 +378,27 @@ export function SessionComposer({
       }
       return
     }
-    if (!canSubmitMessage) return
+    if (!canSubmitMessage || messageAction === null) return
     const text = value
     const files = attachments
-    updateValue("")
-    clear({ revokePreviews: false })
-    const sent = await onSend(text, files, {
-      ...(selectedModelSelection ? { model: selectedModelSelection } : {}),
-      ...(selectedPermissionSelection ? { permission: selectedPermissionSelection } : {}),
-    })
-    if (!sent && valueRef.current === "") {
-      updateValue(text)
+    const submittedRevision = draftRevisionRef.current
+    submittingRef.current = true
+    try {
+      const sent = await onSend(text, files, {
+        ...(selectedModelSelection ? { model: selectedModelSelection } : {}),
+        ...(selectedPermissionSelection ? { permission: selectedPermissionSelection } : {}),
+      }, messageAction)
+      if (sent && mountedRef.current) {
+        const unchanged = draftRevisionRef.current === submittedRevision
+        if (unchanged) updateValue("")
+        // The parent may already have cleared an unchanged successful draft.
+        if ((unchanged || valueRef.current === "") && draftSnapshotRef.current.attachments === files) {
+          clear({ revokePreviews: false })
+        }
+      }
+    } finally {
+      submittingRef.current = false
     }
-  }
-
-  const primaryAction = () => {
-    if (showInterrupt) {
-      onInterrupt()
-      return
-    }
-    void submit()
   }
 
   return (
@@ -397,6 +430,9 @@ export function SessionComposer({
           ) : null}
           <div className="space-y-3 px-4 pt-4">
             <AttachmentPreviewList attachments={attachments} onRemove={remove} />
+            {retryAction && messageAction === null ? (
+              <p role="status" className="text-xs text-muted-foreground">{tSession("messageActionUnavailable")}</p>
+            ) : null}
             {attachmentError ? <p role="alert" className="text-xs text-destructive">{attachmentError}</p> : null}
             {showCommandMenu ? (
               <div className="rounded-xl border border-border bg-popover p-1 text-sm shadow-sm">
@@ -409,9 +445,9 @@ export function SessionComposer({
                         "flex w-full items-start gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-accent hover:text-accent-foreground",
                         !command.enabled && "cursor-not-allowed opacity-50 hover:bg-transparent hover:text-current",
                       )}
-                      disabled={!command.enabled}
+                      disabled={!command.enabled || !canRunCommand}
                       onClick={() => {
-                        if (!command.enabled) return
+                        if (!command.enabled || !canRunCommand) return
                         updateValue("")
                         onCommand(command.id, { args: [], raw: `/${command.id}` })
                       }}
@@ -439,7 +475,7 @@ export function SessionComposer({
                 if (event.nativeEvent.isComposing) return
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault()
-                  if (!showInterrupt) void submit()
+                  void submit()
                 }
               }}
               placeholder={placeholder}
@@ -642,20 +678,31 @@ export function SessionComposer({
               {tSession("takeover")}
             </div>
             <span className="mx-1 h-5 w-px shrink-0 bg-border" />
+            {showInterrupt ? (
+              <Button
+                type="button"
+                size="icon"
+                variant="destructive"
+                aria-label={tSession("interrupt")}
+                className="size-8 rounded-full"
+                disabled={interrupting || sending}
+                onClick={onInterrupt}
+              >
+                {interrupting ? <Loader2 className="animate-spin" /> : <Square />}
+              </Button>
+            ) : null}
             <Button
               type="button"
               size="icon"
-              aria-label={showInterrupt ? tSession("interrupt") : tSession("send")}
-              className={cn("size-8 rounded-full", showInterrupt && "bg-destructive text-destructive-foreground hover:bg-destructive/90")}
-              disabled={showInterrupt ? interrupting : !(canSubmitCommand || canSubmitMessage)}
-              onClick={primaryAction}
+              aria-label={messageAction === "steer" ? tSession("steer") : tSession("send")}
+              className="size-8 rounded-full"
+              disabled={!(canSubmitCommand || canSubmitMessage)}
+              onClick={() => { void submit() }}
             >
-              {sending || interrupting ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : showInterrupt ? (
-                <Square className="size-4" />
+              {sending ? (
+                <Loader2 className="animate-spin" />
               ) : (
-                <ArrowUp className="size-4" />
+                <ArrowUp />
               )}
             </Button>
           </div>
