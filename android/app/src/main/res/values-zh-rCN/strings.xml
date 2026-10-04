@@ -532,6 +532,9 @@
     <string name="session_waiting_approval_placeholder">等待你在下方处理交互…</string>
     <string name="session_pending_placeholder">等待运行时接收任务…</string>
     <string name="session_busy_placeholder">发送中断，或等待当前回合结束</string>
+    <string name="session_steer_placeholder">向当前回合追加指令</string>
+    <string name="session_send_action">发送消息</string>
+    <string name="session_interrupt_action">停止当前回合</string>
     <string name="session_error_placeholder">这个会话有错误，发送后会重试</string>
     <string name="session_takeover">接管</string>
     <string name="session_attachment_camera">相机</string>

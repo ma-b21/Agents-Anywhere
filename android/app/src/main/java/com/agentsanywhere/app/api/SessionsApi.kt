@@ -513,7 +513,7 @@ class SessionsApi(
             path = "/sessions/${sessionId.urlEncode()}/runtime/steer",
             body = body,
             authorizationToken = authorizationToken,
-        ).toRemoteRpcResponse()
+        ).also { it.requireSuccessfulSteerResult() }.toRemoteRpcResponse()
     }
 
     fun uploadSessionAttachments(

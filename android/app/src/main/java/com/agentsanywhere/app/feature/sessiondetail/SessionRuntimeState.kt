@@ -94,26 +94,11 @@ data class EffectiveCapabilities(
         runtime: String?,
         runtimeStatus: SessionRuntimeStatus,
         runtimeType: String? = runtime,
+        retryAction: RuntimeMessageAction? = null,
     ): RuntimeMessageAction? {
         val canSend = isUsable(SESSION_SEND_MESSAGE_CAPABILITY, runtime, runtimeType)
         val canSteer = isUsable(SESSION_STEER_CAPABILITY, runtime, runtimeType)
-        return when {
-            canSteer && (!canSend || runtimeStatus in ACTIVE_RUNTIME_STATUSES) -> RuntimeMessageAction.Steer
-            canSend -> RuntimeMessageAction.Send
-            canSteer -> RuntimeMessageAction.Steer
-            else -> null
-        }
-    }
-
-    private companion object {
-        val ACTIVE_RUNTIME_STATUSES = setOf(
-            SessionRuntimeStatus.Waiting,
-            SessionRuntimeStatus.Pending,
-            SessionRuntimeStatus.Running,
-            SessionRuntimeStatus.Stopping,
-            SessionRuntimeStatus.WaitingApproval,
-            SessionRuntimeStatus.Blocked,
-        )
+        return sessionMessageAction(runtimeStatus, canSend, canSteer, retryAction)
     }
 }
 

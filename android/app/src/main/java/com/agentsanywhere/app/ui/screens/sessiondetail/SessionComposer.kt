@@ -49,6 +49,11 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -96,6 +101,7 @@ internal fun MessageComposer(
     canSend: Boolean,
     sending: Boolean,
     showInterrupt: Boolean,
+    interruptEnabled: Boolean,
     interrupting: Boolean,
     placeholder: String,
     attachments: List<PendingAttachment>,
@@ -201,6 +207,7 @@ internal fun MessageComposer(
                 canSend = canSend,
                 sending = sending,
                 showInterrupt = showInterrupt,
+                interruptEnabled = interruptEnabled,
                 interrupting = interrupting,
                 onToggleTakeover = onToggleTakeover,
                 onOpenAttachMenu = { if (attachmentsEnabled) showAttachMenu = true },
@@ -470,6 +477,7 @@ private fun ComposerActions(
     canSend: Boolean,
     sending: Boolean,
     showInterrupt: Boolean,
+    interruptEnabled: Boolean,
     interrupting: Boolean,
     onToggleTakeover: () -> Unit,
     onOpenAttachMenu: () -> Unit,
@@ -485,17 +493,13 @@ private fun ComposerActions(
         darkMode -> Color(0xFFA1A1AA)
         else -> Color(0xFF3A3935)
     }
-    val primaryActionEnabled = if (showInterrupt) !interrupting else canSend
-    val primaryActionBusy = sending || interrupting
-    val primaryActionSurface = when {
-        showInterrupt -> Color(0xFFEF4444)
+    val sendSurface = when {
         canSend && darkMode -> Color(0xFFFAFAFA)
         canSend -> Color(0xFF2B2B2B)
         darkMode -> Color(0xFF3F3F46)
         else -> Color(0xFFE2E0DC)
     }
-    val primaryActionIcon = when {
-        showInterrupt -> Color.White
+    val sendIcon = when {
         canSend && darkMode -> Color(0xFF09090B)
         canSend -> Color.White
         darkMode -> Color(0xFF71717A)
@@ -558,36 +562,61 @@ private fun ComposerActions(
                 )
             }
         }
-        Box(
-            modifier = Modifier
-                .size(34.dp)
-                .clip(CircleShape)
-                .background(primaryActionSurface)
-                .then(
-                    if (primaryActionEnabled) {
-                        Modifier.noRippleClickable(
-                            onClick = if (showInterrupt) onInterrupt else onSend,
-                        )
-                    } else {
-                        Modifier
-                    },
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            when {
-                primaryActionBusy -> CircularProgressIndicator(
-                    color = primaryActionIcon,
-                    strokeWidth = 2.dp,
-                    modifier = Modifier.size(17.dp),
-                )
-                showInterrupt -> Box(
-                    modifier = Modifier
-                        .size(10.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(primaryActionIcon),
-                )
-                else -> ArrowUpGlyph(primaryActionIcon)
+        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            if (showInterrupt) {
+                ComposerActionButton(
+                    label = stringResource(R.string.session_interrupt_action),
+                    enabled = interruptEnabled && !interrupting,
+                    busy = interrupting,
+                    surface = Color(0xFFEF4444),
+                    icon = Color.White,
+                    onClick = onInterrupt,
+                ) {
+                    Box(
+                        modifier = Modifier.size(10.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(Color.White),
+                    )
+                }
             }
+            ComposerActionButton(
+                label = stringResource(R.string.session_send_action),
+                enabled = canSend && !sending && !interrupting,
+                busy = sending,
+                surface = sendSurface,
+                icon = sendIcon,
+                onClick = onSend,
+            ) { ArrowUpGlyph(sendIcon) }
+        }
+    }
+}
+
+@Composable
+private fun ComposerActionButton(
+    label: String,
+    enabled: Boolean,
+    busy: Boolean,
+    surface: Color,
+    icon: Color,
+    onClick: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier = Modifier.size(34.dp)
+            .clip(CircleShape)
+            .background(surface)
+            .semantics {
+                contentDescription = label
+                role = Role.Button
+                if (!enabled) disabled()
+            }
+            .then(if (enabled) Modifier.noRippleClickable(onClick = onClick) else Modifier),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (busy) {
+            CircularProgressIndicator(color = icon, strokeWidth = 2.dp, modifier = Modifier.size(17.dp))
+        } else {
+            content()
         }
     }
 }
