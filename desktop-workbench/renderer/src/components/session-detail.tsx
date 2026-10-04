@@ -51,6 +51,7 @@ import { createTimelineScrollFollow } from "@/components/session/timeline-scroll
 import { createSessionEventBuffer } from "@/components/session/session-event-buffer"
 import { CAPABILITY, capabilityIsUsable } from "@/components/session/capabilities"
 import { SessionComposer, type AttachedFile } from "@/components/session/session-composer"
+import { sessionMessageAction, type SessionMessageAction } from "@/components/session/session-message-action"
 import {
   acceptSessionEventId,
   bufferedEventsAfterLiveCapabilityRead,
@@ -143,6 +144,7 @@ const COMPOSER_DRAFT_STORAGE_PREFIX = "agents-anywhere.sessionComposerDraft.v1."
 type ComposerDraftState = {
   sessionId: string
   value: string
+  submission?: { action: SessionMessageAction; clientMessageId: string; fileIds: string[] }
 }
 type SessionSourceErrorCode =
   | "session_archived"
@@ -304,11 +306,26 @@ function readComposerDraft(sessionId: string): string {
   }
 }
 
-function writeComposerDraft(sessionId: string, value: string) {
+function readComposerDraftState(sessionId: string): ComposerDraftState {
+  const value = readComposerDraft(sessionId)
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(`${composerDraftStorageKey(sessionId)}.submission`) ?? "null")
+    if (saved?.value === value && (saved.action === "send" || saved.action === "steer") &&
+      typeof saved.clientMessageId === "string" && Array.isArray(saved.fileIds) &&
+      saved.fileIds.every((id: unknown) => typeof id === "string")) {
+      return { sessionId, value, submission: { action: saved.action, clientMessageId: saved.clientMessageId, fileIds: saved.fileIds } }
+    }
+  } catch { /* Missing or invalid retry metadata is not a saved submission. */ }
+  return { sessionId, value }
+}
+
+function writeComposerDraft(sessionId: string, value: string, submission?: ComposerDraftState["submission"]) {
   try {
     const key = composerDraftStorageKey(sessionId)
     if (value) window.localStorage.setItem(key, value)
     else window.localStorage.removeItem(key)
+    if (submission) window.localStorage.setItem(`${key}.submission`, JSON.stringify({ value, ...submission }))
+    else window.localStorage.removeItem(`${key}.submission`)
   } catch {
     // Draft persistence is best-effort; private contexts can still use the composer.
   }
@@ -345,6 +362,9 @@ export function SessionDetail({
   const [loading, setLoading] = React.useState(() => !initialOptimisticState)
   const [error, setError] = React.useState<string | null>(null)
   const [sending, setSending] = React.useState(false)
+  const messageInFlightRef = React.useRef(new Set<string>())
+  const activeSessionIdRef = React.useRef(sessionId)
+  activeSessionIdRef.current = sessionId
   const [interrupting, setInterrupting] = React.useState(false)
   const [takeoverBusy, setTakeoverBusy] = React.useState(false)
   const [resolvingNoticeId, setResolvingNoticeId] = React.useState<string | null>(null)
@@ -364,10 +384,7 @@ export function SessionDetail({
   const [composerHeight, setComposerHeight] = React.useState(144)
   const [timelineGroupOpenByKey, setTimelineGroupOpenByKey] = React.useState<Record<string, boolean>>({})
   const [timelineItemOpenById, setTimelineItemOpenById] = React.useState<Record<string, boolean>>({})
-  const [composerDraftState, setComposerDraftState] = React.useState<ComposerDraftState>(() => ({
-    sessionId,
-    value: readComposerDraft(sessionId),
-  }))
+  const [composerDraftState, setComposerDraftState] = React.useState<ComposerDraftState>(() => readComposerDraftState(sessionId))
   const timelineRef = React.useRef<HTMLDivElement | null>(null)
   const timelineContentRef = React.useRef<HTMLDivElement | null>(null)
   const composerContainerRef = React.useRef<HTMLDivElement | null>(null)
@@ -691,14 +708,16 @@ export function SessionDetail({
   }, [getOptimisticItems, getOptimisticSessionState, isLocalOptimisticSession, sessionId])
 
   React.useEffect(() => {
-    setComposerDraftState({ sessionId, value: readComposerDraft(sessionId) })
+    setComposerDraftState(readComposerDraftState(sessionId))
+    setSending(messageInFlightRef.current.has(sessionId))
   }, [sessionId])
 
   React.useEffect(() => {
-    writeComposerDraft(composerDraftState.sessionId, composerDraftState.value)
+    writeComposerDraft(composerDraftState.sessionId, composerDraftState.value, composerDraftState.submission)
   }, [composerDraftState])
 
   const setComposerDraft = React.useCallback((value: string) => {
+    writeComposerDraft(sessionId, value)
     setComposerDraftState({ sessionId, value })
   }, [sessionId])
 
@@ -847,7 +866,7 @@ export function SessionDetail({
       window.clearTimeout(initialScrollFallbackTimerRef.current)
       initialScrollFallbackTimerRef.current = null
     }
-    setSending(false)
+    setSending(messageInFlightRef.current.has(sessionId))
     setInterrupting(false)
     setError(null)
     const optimisticState = getOptimisticSessionStateRef.current(sessionId)
@@ -1179,13 +1198,40 @@ export function SessionDetail({
     content: string,
     attachments: AttachedFile[],
     selections: { model?: string; permission?: string },
+    action: SessionMessageAction,
   ): Promise<boolean> => {
-    if (!session || (!content.trim() && attachments.length === 0)) return false
+    if (!session || session.id !== sessionId || (!content.trim() && attachments.length === 0) ||
+      messageInFlightRef.current.has(session.id) || interrupting || !session.takeover ||
+      session.archived || session.connectorStatus !== "online" ||
+      blockingInteractions(state?.notices ?? [], session.id).length > 0) return false
+    const retry = composerDraftState.sessionId === session.id && composerDraftState.value === content
+      ? composerDraftState.submission : undefined
+    const allowedAction = sessionMessageAction({
+      status: runtimeStatus,
+      canSendMessage: capabilityIsUsable(effectiveCapabilities, CAPABILITY.sendMessage, sessionRuntimeScope),
+      canSteer: capabilityIsUsable(effectiveCapabilities, CAPABILITY.steer, sessionRuntimeScope),
+      retryAction: retry?.action,
+    })
+    if (allowedAction !== action) {
+      toast.error(tSession("messageActionUnavailable"))
+      return false
+    }
     const uploadedAttachments = attachments.flatMap((attachment) =>
       attachment.uploaded ? [attachment.uploaded] : [],
     )
     if (uploadedAttachments.length !== attachments.length) return false
-    const clientMessageId = createClientId("msg")
+    const fileIds = uploadedAttachments.map((attachment) => attachment.fileId)
+    if (retry && JSON.stringify(retry.fileIds) !== JSON.stringify(fileIds)) {
+      toast.error(tSession("messageActionUnavailable"))
+      return false
+    }
+    const clientMessageId = retry?.clientMessageId ?? createClientId("msg")
+    const submission = { action, clientMessageId, fileIds }
+    // Persist intent before dispatch so a failed steer cannot become a new turn after remount.
+    writeComposerDraft(session.id, content, submission)
+    setComposerDraftState((current) => current.sessionId === session.id && current.value === content
+      ? { ...current, submission } : current)
+    messageInFlightRef.current.add(session.id)
     const messageText = content.trim() || tNew("attachmentOnlyPrompt")
     timelineFollowRef.current?.resume()
     const optimisticMessage = buildOptimisticUserMessage({
@@ -1203,21 +1249,21 @@ export function SessionDetail({
     })
     const previousRuntimeState = state?.state ?? null
     setState((current) => {
-      if (!current) return current
+      if (!current || current.session.id !== session.id) return current
       return {
         ...current,
-        state: nextOptimisticRuntimeState(current.state, current.session, "waiting"),
+        state: action === "steer" ? current.state : nextOptimisticRuntimeState(current.state, current.session, "waiting"),
         items: mergeTimelineItems(current.items, [optimisticMessage]),
       }
     })
     setSending(true)
     try {
-      const selectionPatch = selectionPatchFromComposerSelections(runtimeState?.selections ?? {}, selections)
+      const selectionPatch = action === "steer" ? {} : selectionPatchFromComposerSelections(runtimeState?.selections ?? {}, selections)
       if (Object.keys(selectionPatch).length > 0) {
         const selectionResult = await dashboardApi.updateSessionSelections(token, session.id, selectionPatch)
         setState((current) =>
           current
-            ? {
+            && current.session.id === session.id ? {
                 ...current,
                 state: runtimeStateWithSelectionResult(
                   current.state,
@@ -1229,10 +1275,21 @@ export function SessionDetail({
             : current,
         )
       }
-      await dashboardApi.sendSessionMessage(token, session.id, messageText, {
+      const options = {
         attachments: uploadedAttachments.map((attachment) => ({ fileId: attachment.fileId })),
         clientMessageId,
-      })
+      }
+      if (action === "steer") {
+        await dashboardApi.steerSessionMessage(token, session.id, messageText, options)
+      } else {
+        await dashboardApi.sendSessionMessage(token, session.id, messageText, options)
+      }
+      if (readComposerDraftState(session.id).submission?.clientMessageId === clientMessageId) {
+        writeComposerDraft(session.id, "")
+      }
+      setComposerDraftState((current) => current.sessionId === session.id &&
+        current.submission?.clientMessageId === clientMessageId
+        ? { sessionId: session.id, value: "" } : current)
       return true
     } catch (err) {
       const nextSourceErrorCode = sessionSourceErrorCode(err)
@@ -1243,11 +1300,11 @@ export function SessionDetail({
           : tSession("sendFailed")
       markOptimisticMessageFailed(clientMessageId, message)
       setState((current) => {
-        if (!current) return current
+        if (!current || current.session.id !== session.id) return current
         return {
           ...current,
           state:
-            current.state?.status === "waiting"
+            action === "send" && current.state?.status === "waiting"
               ? previousRuntimeState
               : current.state,
           items: current.items.map((item) =>
@@ -1266,15 +1323,16 @@ export function SessionDetail({
           sourceAvailabilityUpdatedAt: new Date().toISOString(),
           sourceObservationOrigin: "operation",
         }
-        setState((current) => current ? { ...current, session: nextSession } : current)
+        setState((current) => current?.session.id === session.id ? { ...current, session: nextSession } : current)
         onSessionUpdated?.(nextSession)
-        setSourceErrorCode(nextSourceErrorCode)
+        if (activeSessionIdRef.current === session.id) setSourceErrorCode(nextSourceErrorCode)
       } else {
         toast.error(err instanceof Error ? err.message : tSession("sendFailed"))
       }
       return false
     } finally {
-      setSending(false)
+      messageInFlightRef.current.delete(session.id)
+      if (activeSessionIdRef.current === session.id) setSending(false)
     }
   }
 
@@ -1309,7 +1367,7 @@ export function SessionDetail({
   }
 
   const handleInterrupt = async () => {
-    if (!session || interrupting) return
+    if (!session || interrupting || messageInFlightRef.current.has(session.id)) return
     setInterrupting(true)
     try {
       await dashboardApi.interruptSession(token, session.id)
@@ -1776,6 +1834,7 @@ export function SessionDetail({
             <SessionReviewTag files={turnReviewDisplay.activeReview.files} onReview={() => onOpenReview()} />
           ) : null}
           <SessionComposer
+            key={session.id}
             token={token}
             session={session}
             runtimeState={runtimeState}
@@ -1785,6 +1844,7 @@ export function SessionDetail({
             interrupting={interrupting}
             takeoverBusy={takeoverBusy}
             value={composerDraft}
+            retryAction={composerDraftState.sessionId === session.id ? composerDraftState.submission?.action : undefined}
             effectiveCapabilities={state?.effectiveCapabilities ?? null}
             modelCatalog={state?.catalogs.model ?? null}
             permissionCatalog={state?.catalogs.permission ?? null}

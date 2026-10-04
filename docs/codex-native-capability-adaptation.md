@@ -226,8 +226,8 @@
 
 | 客户端 | 状态 | 验证／审阅 | 提交 |
 | --- | --- | --- | --- |
-| Android | 代码修复完成：按能力选择 send/steer、独立停止入口、请求防重入、草稿保护及内层软失败识别 | 策略 4/4、真实 JSON 响应 11/11；独立子代理审阅及复审通过；完整构建／真机待验 | `fix(android): enable capability-gated in-turn steering`（已补充修订） |
-| Windows | 修复及回归测试中：专用 steer API、能力门控、双按钮、草稿与重试保护、内层软失败识别 | 类型检查通过；子代理审阅发现的问题已修正并复审通过；最终回归中 | 待提交 |
+| Android | 代码修复完成：按能力选择 send/steer、独立停止入口、请求防重入、草稿保护及内层软失败识别 | 策略 4/4、真实 JSON 响应 11/11；独立子代理审阅及复审通过；完整构建／真机待验 | `b884b517` |
+| Windows | 代码修复完成：专用 steer API、能力门控、双按钮、草稿与重试保护、内层软失败识别 | TypeScript 检查通过；新增测试 33/33；独立审阅及复审通过 | `fix(desktop): support in-turn steering without interrupting` |
 | Web | 待开始 | 待验证、待审阅 | 待提交 |
 
 共同边界：普通消息仅在 idle/error 发送；运行中必须有可用 `session.steer` 能力才能追加；等待审批、停止中、离线、只读等状态继续阻止发送。失败重试保留原操作类型，不将失败 steer 静默变为新一轮消息。停止与发送使用独立入口，键盘与按钮遵守相同的提交条件。
@@ -237,6 +237,8 @@ Android 验证记录：独立代理使用本机 Java 17、Gradle 缓存中的 Ko
 Android 补充验证：专用 steer 响应检查已使用真实 `org.json:20240303` 编译运行 JUnit，11/11 通过；识别 HTTP 成功但运行时拒绝的直接 result 层，同时保留原外层 RPC 失败处理，不递归误判 metadata。此补丁经另一子代理审阅后合入同一 Android 提交。
 
 Windows 审阅记录：已处理会话切回时发送忙碌状态被重置、迟到成功未清匹配旧草稿、附件编辑未解除旧重试元数据三个问题。新增检查 HTTP 成功但 `result.ok=false` 的 runtime 软失败，避免 turn 结束竞态被误判成功并清草稿；该问题也回补 Android。Steer 不更新模型／权限 selections，不把当前运行状态改成 waiting，不在失败时自动改走普通消息接口。
+
+Windows 验证记录：新增 4 项策略、6 项 API、12 项真实 React/jsdom 输入组件、11 项真实提交函数／草稿持久化测试，共 33/33 通过。`tsc --noEmit --incremental false` 通过。全量 renderer 测试仅剩既有 `task-composer-preferences.test.mjs` 的 `session creation retains preference persistence as a final fallback` 源码标记断言失败（`missing end marker: return (`）；本轮未修改该测试或对应 task-composer 实现，不混入修复。未构建 EXE、未连接真实服务进行端到端测试。
 
 附件边界：Windows/Web 当前页面内失败会保留附件；原有附件 hook 在切换会话或重载后不恢复浏览器 File 对象。本轮不新增跨会话附件恢复；保存的重试文件 ID 与当前附件不匹配时拒绝复用旧请求，需用户重新编辑草稿，不静默丢附件重发。
 
