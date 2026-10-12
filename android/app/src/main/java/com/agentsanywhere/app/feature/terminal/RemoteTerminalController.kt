@@ -70,6 +70,7 @@ class RemoteTerminalController(
     private var socket: WebSocket? = null
     private var connectorId: String? = null
     private var terminalId: String? = null
+    private var connectGeneration = 0L
     private var streamUrl: String? = null
     private var streamAuthorizationToken: String? = null
     private var reconnectScheduled = false
@@ -334,8 +335,28 @@ class RemoteTerminalController(
         }
     }
 
-    private fun connectSocket(url: String) {
+    private fun connectSocket(url: String, rejected: Boolean = false) {
         manuallyClosed = false
+        val expectedUrl = streamUrl
+        val request = ++connectGeneration
+        terminalScope.launch {
+            val refreshed = runCatching { terminalController.refreshStreamUrl(url, rejected) }
+            main.post {
+                if (connectGeneration != request || manuallyClosed || streamUrl != expectedUrl || terminalId == null) return@post
+                refreshed.onSuccess { freshUrl ->
+                    streamUrl = freshUrl
+                    openSocket(freshUrl, rejected)
+                }.onFailure { error ->
+                    if (error is com.agentsanywhere.app.feature.auth.SessionAuthDenied || error is com.agentsanywhere.app.feature.auth.LoginContextChanged) {
+                        manuallyClosed = true
+                        state.value = RemoteTerminalState(status = RemoteTerminalStatus.Closed)
+                    } else scheduleReconnect()
+                }
+            }
+        }
+    }
+
+    private fun openSocket(url: String, authenticationRetried: Boolean) {
         diag("ws connecting terminal=$terminalId fromSeq=${url.substringAfter("fromSeq=", "0").substringBefore("&")}")
         socket = http.newWebSocket(
             Request.Builder().url(url).build(),
@@ -361,8 +382,13 @@ class RemoteTerminalController(
                     if (socket !== webSocket) return
                     socket = null
                     if (isUnauthorizedTerminalConnection(closeCode = code)) {
-                        manuallyClosed = true
-                        streamAuthorizationToken?.let(terminalController::notifyUnauthorized)
+                        main.post {
+                            if (manuallyClosed || streamUrl != url) return@post
+                            if (authenticationRetried) {
+                                manuallyClosed = true
+                                runCatching { terminalController.rejectStreamUrl(url) }
+                            } else connectSocket(url, rejected = true)
+                        }
                         return
                     }
                     if (!manuallyClosed) {
@@ -375,8 +401,13 @@ class RemoteTerminalController(
                     if (socket !== webSocket) return
                     socket = null
                     if (isUnauthorizedTerminalConnection(httpStatusCode = response?.code)) {
-                        manuallyClosed = true
-                        streamAuthorizationToken?.let(terminalController::notifyUnauthorized)
+                        main.post {
+                            if (manuallyClosed || streamUrl != url) return@post
+                            if (authenticationRetried) {
+                                manuallyClosed = true
+                                terminalController.rejectStreamUrl(url)
+                            } else connectSocket(url, rejected = true)
+                        }
                         return
                     }
                     if (!manuallyClosed) {

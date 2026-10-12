@@ -17,6 +17,7 @@ import org.json.JSONObject
 class AuthController(
     private val api: AuthApi,
     private val sessionStore: AuthSessionStore,
+    private val coordinator: NativeAuthCoordinator? = null,
 ) {
     fun savedServerUrl(): String {
         return sessionStore.readServerUrl()
@@ -31,7 +32,7 @@ class AuthController(
     }
 
     fun signOut() {
-        sessionStore.clearAuthSession()
+        if (coordinator != null) coordinator.signOut() else sessionStore.clearAuthSession()
     }
 
     fun normalizedServerUrl(serverUrl: String): String? {
@@ -39,8 +40,9 @@ class AuthController(
     }
 
     suspend fun me(): Result<AuthMeResponse> {
-        val serverUrl = sessionStore.readServerUrl()
-        val token = sessionStore.readAccessToken()
+        val authSnapshot = runCatching { sessionStore.readSnapshot() }.getOrElse { return Result.failure(it) }
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val token = authSnapshot?.accessToken.orEmpty()
         if (serverUrl.isBlank() || token.isBlank()) {
             return Result.failure(IllegalStateException("Sign in again to load account."))
         }
@@ -55,8 +57,9 @@ class AuthController(
     }
 
     suspend fun updateAvatar(avatar: String): Result<AuthMeResponse> {
-        val serverUrl = sessionStore.readServerUrl()
-        val token = sessionStore.readAccessToken()
+        val authSnapshot = runCatching { sessionStore.readSnapshot() }.getOrElse { return Result.failure(it) }
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val token = authSnapshot?.accessToken.orEmpty()
         if (serverUrl.isBlank() || token.isBlank()) {
             return Result.failure(IllegalStateException("Sign in again to update avatar."))
         }
@@ -71,8 +74,9 @@ class AuthController(
     }
 
     suspend fun clearAvatar(): Result<AuthMeResponse> {
-        val serverUrl = sessionStore.readServerUrl()
-        val token = sessionStore.readAccessToken()
+        val authSnapshot = runCatching { sessionStore.readSnapshot() }.getOrElse { return Result.failure(it) }
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val token = authSnapshot?.accessToken.orEmpty()
         if (serverUrl.isBlank() || token.isBlank()) {
             return Result.failure(IllegalStateException("Sign in again to clear avatar."))
         }
@@ -99,8 +103,9 @@ class AuthController(
         withAccountCredentials { serverUrl, token -> api.bindEmail(serverUrl, token, email, code) }
 
     private suspend fun <T> withAccountCredentials(action: (String, String) -> T): Result<T> {
-        val serverUrl = sessionStore.readServerUrl()
-        val token = sessionStore.readAccessToken()
+        val authSnapshot = runCatching { sessionStore.readSnapshot() }.getOrElse { return Result.failure(it) }
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val token = authSnapshot?.accessToken.orEmpty()
         if (serverUrl.isBlank() || token.isBlank()) {
             return Result.failure(IllegalStateException("Sign in again to update account."))
         }
@@ -119,8 +124,9 @@ class AuthController(
         if (newPassword.length < 8) {
             return Result.failure(IllegalArgumentException("Password must be at least 8 characters."))
         }
-        val serverUrl = sessionStore.readServerUrl()
-        val token = sessionStore.readAccessToken()
+        val authSnapshot = runCatching { sessionStore.readSnapshot() }.getOrElse { return Result.failure(it) }
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val token = authSnapshot?.accessToken.orEmpty()
         if (serverUrl.isBlank() || token.isBlank()) {
             return Result.failure(IllegalStateException("Sign in again to change password."))
         }
@@ -141,11 +147,12 @@ class AuthController(
 
         return withContext(Dispatchers.IO) {
             runCatching {
+                val epoch = sessionStore.beginLogin(server.serverUrl)
                 api.requireHealthyServer(serverUrl = server.serverUrl)
                 api.requireWebLoginHost(webOrigin = server.oauthWebOrigin)
                 currentCoroutineContext().ensureActive()
-                sessionStore.saveServerUrl(server.serverUrl)
-                com.agentsanywhere.app.feature.auth.createWebLoginSession(server)
+                sessionStore.requireLoginEpoch(epoch)
+                com.agentsanywhere.app.feature.auth.createWebLoginSession(server).also { it.loginEpoch = epoch }
             }.recoverCatching { error ->
                 if (error is CancellationException) throw error
                 if (error is ApiException) throw error
@@ -168,6 +175,7 @@ class AuthController(
         }
         return withContext(Dispatchers.IO) {
             runCatching {
+                sessionStore.requireLoginEpoch(session.loginEpoch)
                 val token = api.oauthToken(
                     serverUrl = session.serverUrl,
                     code = code,
@@ -178,11 +186,11 @@ class AuthController(
                 completeWebLoginSession(
                     token = token,
                     loadMe = { accessToken ->
-                        api.me(serverUrl = session.serverUrl, token = accessToken)
+                        AuthApi().me(serverUrl = session.serverUrl, token = accessToken)
                     },
                     saveSession = { auth ->
                         operationContext.ensureActive()
-                        sessionStore.saveAuthSession(session.serverUrl, auth)
+                        sessionStore.saveAuthSession(session.serverUrl, auth, session.loginEpoch)
                     },
                 )
             }.recoverCatching { error ->
@@ -202,14 +210,15 @@ class AuthController(
 
         return withContext(Dispatchers.IO) {
             runCatching {
-                sessionStore.saveServerUrl(payload.serverUrl)
+                val epoch = sessionStore.beginLogin(payload.serverUrl)
                 api.requestMobileLogin(
                     serverUrl = payload.serverUrl,
                     userId = payload.userId,
                     loginToken = payload.loginToken,
                     deviceName = deviceName,
                 )
-                payload
+                sessionStore.requireLoginEpoch(epoch)
+                payload.copy(loginEpoch = epoch)
             }.recoverCatching { error ->
                 if (error is ApiException) throw error
                 throw IllegalStateException(error.message ?: "QR sign-in request failed.", error)
@@ -238,12 +247,13 @@ class AuthController(
     ): Result<Unit> {
         return withContext(Dispatchers.IO) {
             runCatching {
+                sessionStore.requireLoginEpoch(payload.loginEpoch)
                 val exchange = api.exchangeMobileLogin(
                     serverUrl = payload.serverUrl,
                     userId = payload.userId,
                     loginToken = payload.loginToken,
                 )
-                sessionStore.saveMobileAuthSession(payload.serverUrl, exchange)
+                sessionStore.saveMobileAuthSession(payload.serverUrl, exchange, payload.loginEpoch)
             }.recoverCatching { error ->
                 if (error is ApiException) throw error
                 throw IllegalStateException(error.message ?: "Could not complete QR sign-in.", error)
@@ -292,6 +302,7 @@ internal fun completeWebLoginSession(
             accessToken = token.accessToken,
             tokenType = token.tokenType,
             serverTime = me.serverTime,
+            renewal = token.renewal?.copy(userId = me.userId),
         ),
     )
 }

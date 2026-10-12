@@ -44,8 +44,9 @@ class SessionsController(
         )
     }
     suspend fun loadSessions(): Result<SessionsState> {
-        val serverUrl = sessionStore.readServerUrl()
-        val accessToken = sessionStore.readAccessToken()
+        val authSnapshot = runCatching { sessionStore.readSnapshot() }.getOrElse { return Result.failure(it) }
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val accessToken = authSnapshot?.accessToken.orEmpty()
         if (serverUrl.isBlank() || accessToken.isBlank()) {
             return Result.failure(IllegalStateException("Sign in again to load sessions."))
         }
@@ -89,8 +90,9 @@ class SessionsController(
         cursor: String,
         devices: List<AgentDevice>,
     ): Result<SessionPageAppend> {
-        val serverUrl = sessionStore.readServerUrl()
-        val accessToken = sessionStore.readAccessToken()
+        val authSnapshot = runCatching { sessionStore.readSnapshot() }.getOrElse { return Result.failure(it) }
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val accessToken = authSnapshot?.accessToken.orEmpty()
         if (serverUrl.isBlank() || accessToken.isBlank()) {
             return Result.failure(IllegalStateException("Sign in again to load sessions."))
         }
@@ -138,8 +140,9 @@ class SessionsController(
         validateNewSessionDraft(draft)?.let { error ->
             return NewSessionCreateOutcome.Failed(IllegalArgumentException(error))
         }
-        val serverUrl = sessionStore.readServerUrl()
-        val accessToken = sessionStore.readAccessToken()
+        val authSnapshot = runCatching { sessionStore.readSnapshot() }.getOrElse { return NewSessionCreateOutcome.Failed(it) }
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val accessToken = authSnapshot?.accessToken.orEmpty()
         if (serverUrl.isBlank() || accessToken.isBlank()) {
             return NewSessionCreateOutcome.Failed(IllegalStateException("Sign in again to create a session."))
         }
@@ -245,8 +248,9 @@ class SessionsController(
         root: String,
         path: String = ".",
     ): Result<NewSessionDirectory> {
-        val serverUrl = sessionStore.readServerUrl()
-        val accessToken = sessionStore.readAccessToken()
+        val authSnapshot = runCatching { sessionStore.readSnapshot() }.getOrElse { return Result.failure(it) }
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val accessToken = authSnapshot?.accessToken.orEmpty()
         if (serverUrl.isBlank() || accessToken.isBlank()) {
             return Result.failure(IllegalStateException("Sign in again to browse files."))
         }
@@ -594,8 +598,9 @@ class SessionsController(
         scope: String,
         devices: List<AgentDevice>,
     ): Result<List<AgentSession>> {
-        val serverUrl = sessionStore.readServerUrl()
-        val accessToken = sessionStore.readAccessToken()
+        val authSnapshot = runCatching { sessionStore.readSnapshot() }.getOrElse { return Result.failure(it) }
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val accessToken = authSnapshot?.accessToken.orEmpty()
         if (serverUrl.isBlank() || accessToken.isBlank()) {
             return Result.failure(IllegalStateException("Sign in again to update sessions."))
         }
@@ -623,8 +628,9 @@ class SessionsController(
         archived: Boolean?,
         devices: List<AgentDevice>,
     ): Result<AgentSession> {
-        val serverUrl = sessionStore.readServerUrl()
-        val accessToken = sessionStore.readAccessToken()
+        val authSnapshot = runCatching { sessionStore.readSnapshot() }.getOrElse { return Result.failure(it) }
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val accessToken = authSnapshot?.accessToken.orEmpty()
         if (serverUrl.isBlank() || accessToken.isBlank()) {
             return Result.failure(IllegalStateException("Sign in again to update this session."))
         }
@@ -726,8 +732,9 @@ class SessionsController(
 
 
     private fun newSessionAuth(): NewSessionAuth? {
-        val serverUrl = sessionStore.readServerUrl()
-        val accessToken = sessionStore.readAccessToken()
+        val authSnapshot = runCatching { sessionStore.readSnapshot() }.getOrElse { return null }
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val accessToken = authSnapshot?.accessToken.orEmpty()
         if (serverUrl.isBlank() || accessToken.isBlank()) return null
         return NewSessionAuth(serverUrl = serverUrl, accessToken = accessToken)
     }

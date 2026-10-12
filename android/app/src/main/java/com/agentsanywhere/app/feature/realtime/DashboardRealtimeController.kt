@@ -6,6 +6,7 @@ import com.agentsanywhere.app.feature.auth.AuthSessionReader
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -44,8 +45,12 @@ class DashboardRealtimeController(
         var attempt = 0
         var initialFailureReported = false
         while (isActive) {
-            val serverUrl = sessionStore.readServerUrl()
-            val accessToken = sessionStore.readAccessToken()
+            val authSnapshot = try { sessionStore.readSnapshot() } catch (_: Exception) {
+                delay(1_000)
+                continue // Temporary secure-store failure is not a revoked login.
+            }
+            val serverUrl = authSnapshot?.serverUrl.orEmpty()
+            val accessToken = authSnapshot?.accessToken.orEmpty()
             if (serverUrl.isBlank() || accessToken.isBlank()) return@launch
 
             val incoming = Channel<String>(Channel.UNLIMITED)

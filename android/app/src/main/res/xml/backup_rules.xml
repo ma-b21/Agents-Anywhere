@@ -2,5 +2,5 @@
 <full-backup-content>
     <exclude
         domain="sharedpref"
-        path="auth.xml" />
+        path="agents_anywhere_auth.xml" />
 </full-backup-content>

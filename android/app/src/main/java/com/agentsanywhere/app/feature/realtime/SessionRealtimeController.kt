@@ -68,8 +68,12 @@ class SessionRealtimeController(
             onSnapshotRequired(reason)
         }
         while (isActive) {
-            val serverUrl = sessionStore.readServerUrl()
-            val accessToken = sessionStore.readAccessToken()
+            val authSnapshot = try { sessionStore.readSnapshot() } catch (_: Exception) {
+                delay(1_000)
+                continue // Temporary secure-store failure is not a revoked login.
+            }
+            val serverUrl = authSnapshot?.serverUrl.orEmpty()
+            val accessToken = authSnapshot?.accessToken.orEmpty()
             if (serverUrl.isBlank() || accessToken.isBlank()) return@launch
             val connectionGeneration = generationSequence.incrementAndGet()
             synchronized(connectionLock) {

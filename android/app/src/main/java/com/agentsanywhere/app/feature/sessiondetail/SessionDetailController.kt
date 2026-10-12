@@ -537,14 +537,22 @@ class SessionDetailController(
         }
     }
 
+    fun attachmentLoginContext(): String = runCatching { sessionStore.readSnapshot()?.let { it.serverUrl + ":" + it.loginGeneration }.orEmpty() }.getOrDefault("")
+
     suspend fun downloadAttachment(
         sessionId: String,
         attachment: TimelineAttachment,
+        expectedLoginContext: String? = null,
     ): Result<DownloadedAttachment> {
         return withContext(Dispatchers.IO) {
             runCatching {
-                val auth = authSession()
-                attachmentTransfer.download(auth.serverUrl, auth.accessToken, sessionId, attachment)
+                val snapshot = sessionStore.readSnapshot() ?: throw com.agentsanywhere.app.feature.auth.LoginContextChanged()
+                val auth = ApiAuth(snapshot.serverUrl, snapshot.accessToken)
+                val loginContext = snapshot.serverUrl + ":" + snapshot.loginGeneration
+                if (expectedLoginContext != null && expectedLoginContext != loginContext) throw com.agentsanywhere.app.feature.auth.LoginContextChanged()
+                val downloaded = attachmentTransfer.download(auth.serverUrl, auth.accessToken, sessionId, attachment)
+                if (attachmentLoginContext() != loginContext) throw com.agentsanywhere.app.feature.auth.LoginContextChanged()
+                downloaded
             }
         }
     }
@@ -828,8 +836,9 @@ class SessionDetailController(
     }
 
     private fun authSession(): ApiAuth {
-        val serverUrl = sessionStore.readServerUrl()
-        val accessToken = sessionStore.readAccessToken()
+        val authSnapshot = sessionStore.readSnapshot()
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val accessToken = authSnapshot?.accessToken.orEmpty()
         if (serverUrl.isBlank() || accessToken.isBlank()) {
             throw IllegalStateException("Sign in again to load this session.")
         }

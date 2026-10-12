@@ -72,8 +72,26 @@ class TerminalApi(
         return webSocketApiUrl(
             serverUrl = serverUrl,
             path = "/connectors/${deviceId.urlEncode()}/terminals-v2/${terminalId.urlEncode()}/stream" +
-                "?fromSeq=$fromSeq&token=${authorizationToken.urlEncode()}",
+                "?fromSeq=$fromSeq&token=${client.authorizationToken(serverUrl, authorizationToken).urlEncode()}",
         )
+    }
+
+    fun refreshStreamUrl(url: String, rejected: Boolean): String {
+        val parsed = java.net.URI(url)
+        val origin = java.net.URI(if (parsed.scheme == "wss") "https" else "http", null, parsed.host, parsed.port, null, null, null).toString()
+        val query = parsed.rawQuery.orEmpty().split("&")
+        val oldToken = query.firstOrNull { it.startsWith("token=") }?.substringAfter("=")
+            ?.let { java.net.URLDecoder.decode(it, "UTF-8") } ?: error("Missing terminal authentication.")
+        val token = client.terminalToken(origin, oldToken, rejected)
+        val nextQuery = query.joinToString("&") { if (it.startsWith("token=")) "token=${token.urlEncode()}" else it }
+        return "${url.substringBefore('?')}?$nextQuery"
+    }
+
+    fun rejectStreamUrl(url: String) {
+        val parsed = java.net.URI(url)
+        val origin = java.net.URI(if (parsed.scheme == "wss") "https" else "http", null, parsed.host, parsed.port, null, null, null).toString()
+        val token = parsed.rawQuery.orEmpty().split("&").firstOrNull { it.startsWith("token=") }?.substringAfter("=") ?: return
+        client.rejectTerminalToken(origin, java.net.URLDecoder.decode(token, "UTF-8"))
     }
 
     internal fun notifyUnauthorized(authorizationToken: String) {

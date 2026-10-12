@@ -1,6 +1,7 @@
 package com.agentsanywhere.app.api
 
 import org.json.JSONObject
+import com.agentsanywhere.app.feature.auth.RenewableCredentials
 
 class AuthApi(
     private val client: ApiClient = ApiClient(),
@@ -48,6 +49,7 @@ class AuthApi(
                 "client_id" to "agents-anywhere-mobile",
                 "redirect_uri" to "agents-anywhere://oauth/callback",
                 "code_verifier" to codeVerifier,
+                "refresh_protocol_version" to "1",
             ),
         ).toOAuthTokenResponse()
     }
@@ -107,7 +109,8 @@ class AuthApi(
                 path = "/auth/mobile-login/exchange",
                 body = JSONObject()
                     .put("userId", userId)
-                    .put("loginToken", loginToken),
+                    .put("loginToken", loginToken)
+                    .put("refreshProtocolVersion", 1),
             ).toMobileLoginExchangeResponse()
         } catch (exc: ApiException) {
             if (exc.statusCode == 401) {
@@ -207,6 +210,7 @@ class AuthApi(
             expiresIn = getInt("expires_in"),
             scope = optString("scope"),
             refreshToken = optNullableString("refresh_token"),
+            renewal = toRenewableCredentials(snakeCase = true),
         )
     }
 
@@ -233,6 +237,7 @@ class AuthApi(
             accessToken = getString("accessToken"),
             tokenType = optString("tokenType", "bearer"),
             serverTime = getString("serverTime"),
+            renewal = toRenewableCredentials(),
         )
     }
 

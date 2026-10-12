@@ -18,6 +18,7 @@ class WebLoginSession internal constructor(
     val state: String,
     internal val codeVerifier: String,
 ) {
+    internal var loginEpoch: Long = 0
     private val callbackConsumed = AtomicBoolean(false)
 
     internal fun consumeCallback(): Boolean = callbackConsumed.compareAndSet(false, true)

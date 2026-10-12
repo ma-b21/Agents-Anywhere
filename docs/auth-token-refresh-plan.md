@@ -8,8 +8,8 @@
 
 | 阶段 | 实施 | 测试 | 独立审阅 | commit |
 | --- | --- | --- | --- | --- |
-| server | 代码完成 | 可运行全套898通过；增补后专项218通过 | 最终复审通过；审阅者独立4项通过 | 提交中（下端提交补录hash） |
-| Android | 未开始 | 未执行 | 未执行 | 待提交 |
+| server | 代码完成 | 可运行全套898通过；增补后专项218通过 | 最终复审通过；审阅者独立4项通过 | 5b20a74c |
+| Android | 完成 | Kotlin2.2 controller编译、36项JVM/HTTP/边界通过；APK/真机未验 | 最终复审通过；审阅者独立36项通过 | 本阶段commit |
 | Windows | 未开始 | 未执行 | 未执行 | 待提交 |
 | Web | 未开始 | 未执行 | 未执行 | 待提交 |
 
@@ -24,10 +24,12 @@
 
 ### Android可执行清单
 
-- [ ] 凭据模型、加密存储、atomic snapshot/pending attempt；扫码与OAuth均保存。
-- [ ] 单飞协调器、过期前刷新/401一次重试、取消与账号切换保护。
-- [ ] App生命周期、上传/下载、realtime最新token接入，临时故障不退出。
-- [ ] 单元/集成、可用构建和真机验收记录；独立审阅复测后提交Android commit。
+- [x] 凭据模型、加密存储、atomic snapshot/pending attempt；扫码与OAuth均保存。
+- [x] 单飞协调器、过期前刷新/401一次重试、取消与账号切换保护。
+- [x] App生命周期、上传/下载、realtime最新token接入，临时故障不退出。
+- [x] 单元/集成、可用构建和真机验收记录；独立审阅复测后提交Android commit。
+
+Android阶段记录：项目同版Kotlin2.2编译API/模型/会话与realtime controller依赖图通过（未改动DevicesController底部纯映射抽取为本地编译fixture，排除Android UI和不相关AppUpdates，不等价完整APK）。状态机22项、真实localhost HTTP9项、controller存储异常边界5项通过，覆盖20请求单飞、持久化attempt、丢响应/重启恢复、写盘失败、旧401、认证仅一次重试、业务网络错误不重放、切账号/host保护、撤销、取消、legacy升级与降级、0TTL恢复、退出。离线Gradle已启动并解析项目，因本机无Android SDK停止；不把纯逻辑测试记为APK/Keystore/Compose验收。终端重连、前台定时续领及图片预览已接入认证通道。首轮独立审阅发现host错配、SharedPreferences先改内存后写盘、64代旧token淘汰、错误通知阻塞future等边界，已加严格上下文、原子读取、durable write barrier、fingerprint识别和必完成future，并补回归；图片/备份隔离同步收尾，最终复审通过，审阅者独立重跑36项全通过；APK/Compose/Keystore/真机仍是发布前门禁。
 
 ### Windows可执行清单
 
@@ -348,3 +350,5 @@ E2E：各端登录 → 持续超过短access TTL的任务 → 不切会话观察
 4. 旧安装：接受有效会话自动升级、过期重登一次，还是另做旧扫码refresh单次迁移？建议前者。
 
 建议先P0/P1/P2和服务端故障注入，再Android；不要三端先发刷新，最后补服务端和会话策略。
+
+Android补充复审：已补第二次业务401迟到时按被拒绝token与credentialVersion条件撤销，检查和标记位于同一synchronized临界区。新增并发a2回归，22项状态机通过，独立Kotlin2.2编译/22项复测通过；原9项HTTP与5项存储边界保留，合计36项。真实APK/Keystore/设备门禁不变。

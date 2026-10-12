@@ -1,5 +1,7 @@
 package com.agentsanywhere.app.api
 
+import com.agentsanywhere.app.feature.auth.RenewableCredentials
+
 data class AuthResponse(
     val userId: String,
     val role: String,
@@ -9,6 +11,7 @@ data class AuthResponse(
     val email: String? = null,
     val displayName: String = "",
     val emailVerified: Boolean = false,
+    val renewal: RenewableCredentials? = null,
 )
 
 data class AuthMeResponse(
@@ -42,6 +45,7 @@ data class OAuthTokenResponse(
     val expiresIn: Int,
     val scope: String,
     val refreshToken: String?,
+    val renewal: RenewableCredentials? = null,
 )
 
 data class MobileLoginStatusResponse(

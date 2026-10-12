@@ -1,6 +1,9 @@
 package com.agentsanywhere.app.app
 
 import android.content.Context
+import com.agentsanywhere.app.feature.auth.NativeAuthCoordinator
+import com.agentsanywhere.app.api.NativeAuthApiTransport
+import com.agentsanywhere.app.api.ApiException
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Network
@@ -70,6 +73,9 @@ import com.agentsanywhere.app.ui.designsystem.AgentsAnywhereTheme
 import com.agentsanywhere.app.ui.designsystem.AALanguageMode
 import com.agentsanywhere.app.ui.screens.home.HomeTab
 import com.agentsanywhere.app.ui.screens.update.AppUpdatePromptDialog
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
@@ -115,10 +121,16 @@ fun AgentsAnywhereApp(
     var deviceSetupReturnDestinationName by rememberSaveable { mutableStateOf(AppDestination.Devices.name) }
     var selectedHomeTabName by rememberSaveable { mutableStateOf(HomeTab.Active.name) }
     val unauthorizedTokens = remember { Channel<String>(capacity = Channel.UNLIMITED) }
-    val apiClient = remember(unauthorizedTokens) {
+    val authCoordinator = remember(sessionStore, unauthorizedTokens) {
+        NativeAuthCoordinator(sessionStore, NativeAuthApiTransport(),
+            isUnauthorized = { error -> error is ApiException && (error.statusCode == 401 || (error.statusCode == 403 && error.errorCode == "account_disabled")) },
+            onRevoked = { token -> unauthorizedTokens.trySend(token); Unit },
+        )
+    }
+    val apiClient = remember(unauthorizedTokens, authCoordinator) {
         ApiClient(onUnauthorized = { accessToken ->
             unauthorizedTokens.trySend(accessToken)
-        })
+        }, sessionAuth = authCoordinator)
     }
     val realtimeApi = remember(apiClient) { RealtimeApi(client = apiClient) }
     val realtimeClientId = remember(context) { RealtimeClientIdStore(context).readOrCreate() }
@@ -126,6 +138,7 @@ fun AgentsAnywhereApp(
         AuthController(
             api = AuthApi(apiClient),
             sessionStore = sessionStore,
+            coordinator = authCoordinator,
         )
     }
     val sessionsController = remember(context, sessionStore, apiClient) {
@@ -263,6 +276,19 @@ fun AgentsAnywhereApp(
         pendingMobileLoginQr = null
         webLoginViewModel.resetForSignedOutEntry()
         destinationName = AppDestination.LoginMethods.name
+    }
+
+    LaunchedEffect(appVisible, hasAuthSession, authCoordinator) {
+        if (!appVisible || !hasAuthSession) return@LaunchedEffect
+        while (true) {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val snapshot = sessionStore.readSnapshot()
+                    if (snapshot != null) authCoordinator.accessToken(snapshot.serverUrl, snapshot.accessToken)
+                }
+            }
+            delay(30_000)
+        }
     }
 
     LaunchedEffect(unauthorizedTokens) {

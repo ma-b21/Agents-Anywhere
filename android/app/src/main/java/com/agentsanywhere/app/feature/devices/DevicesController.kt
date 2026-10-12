@@ -279,8 +279,9 @@ class DevicesController(
     }
 
     private fun authSession(): ApiAuth? {
-        val serverUrl = sessionStore.readServerUrl()
-        val accessToken = sessionStore.readAccessToken()
+        val authSnapshot = runCatching { sessionStore.readSnapshot() }.getOrNull()
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val accessToken = authSnapshot?.accessToken.orEmpty()
         return if (serverUrl.isBlank() || accessToken.isBlank()) {
             null
         } else {

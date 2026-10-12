@@ -125,9 +125,13 @@ class TerminalController(
         }
     }
 
+    fun refreshStreamUrl(url: String, rejected: Boolean): String = terminalApi.refreshStreamUrl(url, rejected)
+    fun rejectStreamUrl(url: String) = terminalApi.rejectStreamUrl(url)
+
     private fun authSession(): ApiAuth {
-        val serverUrl = sessionStore.readServerUrl()
-        val accessToken = sessionStore.readAccessToken()
+        val authSnapshot = sessionStore.readSnapshot()
+        val serverUrl = authSnapshot?.serverUrl.orEmpty()
+        val accessToken = authSnapshot?.accessToken.orEmpty()
         if (serverUrl.isBlank() || accessToken.isBlank()) {
             throw IllegalStateException("Sign in again to open terminal.")
         }

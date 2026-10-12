@@ -13,9 +13,11 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.TimeUnit
 import org.json.JSONException
+import com.agentsanywhere.app.feature.auth.NativeAuthCoordinator
 
 class ApiClient(
     private val onUnauthorized: (accessToken: String) -> Unit = {},
+    private val sessionAuth: NativeAuthCoordinator? = null,
 ) {
     fun requireHtmlDocument(
         serverUrl: String,
@@ -179,6 +181,12 @@ class ApiClient(
         files: List<UploadFilePart>,
         authorizationToken: String? = null,
     ): JSONObject {
+        return withCredentials(serverUrl, authorizationToken) { token ->
+            postMultipartOnce(serverUrl, path, files, token)
+        }
+    }
+
+    private fun postMultipartOnce(serverUrl: String, path: String, files: List<UploadFilePart>, authorizationToken: String?): JSONObject {
         return try {
             val endpoint = URL(apiUrl(serverUrl, path))
             val boundary = "AA-${System.currentTimeMillis()}"
@@ -187,6 +195,7 @@ class ApiClient(
                 connectTimeout = 10_000
                 readTimeout = 60_000
                 doOutput = true
+                instanceFollowRedirects = false
                 setRequestProperty("Accept", "application/json")
                 setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
                 setRequestProperty("ngrok-skip-browser-warning", "true")
@@ -211,11 +220,11 @@ class ApiClient(
                 val responseCode = connection.responseCode
                 val responseText = readResponseText(connection, responseCode)
                 if (responseCode !in 200..299) {
-                    notifyUnauthorized(responseCode, authorizationToken)
+                    if (sessionAuth == null) notifyUnauthorized(responseCode, authorizationToken)
                     throw ApiException(
                         message = parseErrorMessage(responseText) ?: defaultErrorMessage(responseCode),
                         statusCode = responseCode,
-                        errorCode = parseErrorCode(responseText),
+                        errorCode = connection.getHeaderField("X-AA-Auth-Error") ?: parseErrorCode(responseText),
                     )
                 }
                 if (responseText.isBlank()) JSONObject() else JSONObject(responseText)
@@ -238,6 +247,12 @@ class ApiClient(
         readTimeoutSeconds: Long? = null,
         requestBody: RequestBody? = null,
     ): JSONObject {
+        return withCredentials(serverUrl, authorizationToken) { token ->
+            requestJsonOnce(serverUrl, path, method, bodyText, token, readTimeoutSeconds, requestBody)
+        }
+    }
+
+    private fun requestJsonOnce(serverUrl: String, path: String, method: String, bodyText: String?, authorizationToken: String?, readTimeoutSeconds: Long?, requestBody: RequestBody?): JSONObject {
         return try {
             val resolvedRequestBody = requestBody ?: when {
                 bodyText != null -> bodyText.toRequestBody(JSON_MEDIA_TYPE)
@@ -274,11 +289,11 @@ class ApiClient(
                     if (canTryLegacy) return@forEachIndexed
 
                     if (!response.isSuccessful) {
-                        notifyUnauthorized(response.code, authorizationToken)
+                        if (sessionAuth == null) notifyUnauthorized(response.code, authorizationToken)
                         throw ApiException(
                             message = parseErrorMessage(responseText) ?: defaultErrorMessage(response.code),
                             statusCode = response.code,
-                            errorCode = parseErrorCode(responseText),
+                            errorCode = response.header("X-AA-Auth-Error") ?: parseErrorCode(responseText),
                         )
                     }
 
@@ -297,15 +312,34 @@ class ApiClient(
         }
     }
 
+    fun terminalToken(serverUrl: String, supplied: String, rejected: Boolean): String =
+        sessionAuth?.accessToken(serverUrl, supplied, supplied.takeIf { rejected }) ?: supplied
+
+    fun rejectTerminalToken(serverUrl: String, supplied: String) {
+        if (sessionAuth != null) sessionAuth.rejectToken(serverUrl, supplied) else notifyUnauthorized(401, supplied)
+    }
+
     internal fun notifyUnauthorized(statusCode: Int, authorizationToken: String?) {
         if (!shouldNotifyUnauthorized(statusCode, authorizationToken)) return
         runCatching { onUnauthorized(authorizationToken.orEmpty()) }
     }
 
+    private fun withCredentials(serverUrl: String, token: String?, action: (String?) -> JSONObject): JSONObject {
+        val auth = sessionAuth
+        if (auth == null || token.isNullOrBlank()) return action(token)
+        val origin = requireNotNull(normalizeServerOrigin(serverUrl))
+        return auth.execute(origin, token) { action(it) }
+    }
+
+    fun authorizationToken(serverUrl: String, supplied: String, rejected: Boolean = false): String =
+        sessionAuth?.accessToken(requireNotNull(normalizeServerOrigin(serverUrl)), supplied, supplied.takeIf { rejected }) ?: supplied
+
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         val EMPTY_JSON_BODY = ByteArray(0).toRequestBody(JSON_MEDIA_TYPE)
         val JSON_HTTP_CLIENT: OkHttpClient = OkHttpClient.Builder()
+            .retryOnConnectionFailure(false)
+            .followRedirects(false)
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .build()

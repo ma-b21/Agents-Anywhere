@@ -1,6 +1,5 @@
 package com.agentsanywhere.app.ui.screens.sessiondetail
 
-import android.content.Context
 import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -43,12 +42,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil3.compose.SubcomposeAsyncImage
 import coil3.compose.SubcomposeAsyncImageContent
-import coil3.network.NetworkHeaders
-import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 import com.agentsanywhere.app.R
-import com.agentsanywhere.app.feature.sessiondetail.AttachmentImageRequest
 import com.agentsanywhere.app.feature.sessiondetail.SessionDetailController
 import com.agentsanywhere.app.feature.sessiondetail.TimelineAttachment
 import com.agentsanywhere.app.ui.designsystem.AAToastHost
@@ -500,58 +496,17 @@ private fun rememberAttachmentImageRequest(
     attachment: TimelineAttachment,
 ): ImageRequest? {
     val context = LocalContext.current
-    val image = remember(sessionId, attachment.fileId) {
-        controller.attachmentImageRequest(sessionId, attachment).getOrNull()
+    // Use the authenticated download path (refresh + one auth retry), not a frozen
+    // Bearer header handed to an unrelated image loader.
+    val loginContext = controller.attachmentLoginContext()
+    val request = androidx.compose.runtime.produceState<ImageRequest?>(null, context, controller, sessionId, attachment.fileId, loginContext) {
+        controller.downloadAttachment(sessionId, attachment, expectedLoginContext = loginContext).getOrNull()?.let { downloaded ->
+            value = ImageRequest.Builder(context)
+                .data(downloaded.bytes)
+                .memoryCacheKey("attachment:$loginContext:$sessionId:${attachment.fileId}")
+                .crossfade(true)
+                .build()
+        }
     }
-    return remember(context, image) {
-        image?.toCoilRequest(context)
-    }
-}
-
-private fun AttachmentImageRequest.toCoilRequest(context: Context): ImageRequest {
-    val headers = NetworkHeaders.Builder()
-        .set("Authorization", "Bearer $authorizationToken")
-        .build()
-    return ImageRequest.Builder(context)
-        .data(url)
-        .httpHeaders(headers)
-        .memoryCacheKey(cacheKey)
-        .diskCacheKey(cacheKey)
-        .crossfade(true)
-        .build()
-}
-
-@Composable
-private fun ImageLoadingPlaceholder(modifier: Modifier) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .shimmer()
-            .background(Color(0x2227272A)),
-    )
-}
-
-@Composable
-private fun ImageFallback(
-    name: String,
-    fallbackColor: Color,
-    modifier: Modifier,
-) {
-    Box(
-        modifier = modifier.background(Color(0x22000000)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = name,
-            color = fallbackColor,
-            fontSize = 12.sp,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(10.dp),
-        )
-    }
-}
-
-private fun Double.formatOneDecimal(): String {
-    return String.format("%.1f", this)
+    return request.value
 }
