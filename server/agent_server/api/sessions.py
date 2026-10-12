@@ -26,6 +26,7 @@ from agent_server.api.connector_runtimes import (
 )
 from agent_server.api.server_push_websocket import (
     run_server_push_until_disconnect,
+    wait_for_auth_revocation,
 )
 from agent_server.core.capabilities import (
     SESSION_COMMANDS,
@@ -96,6 +97,7 @@ from agent_server.infra.event_preparation import EventPreparationCapacityError
 from agent_server.infra.repositories.facade import Store
 from agent_server.infra.timeline_broker import TimelineBroker
 from agent_server.infra.ws_tickets import ClientWsTicketManager
+from agent_server.services.auth_sessions import AuthSessions, SessionError
 from agent_server.services.catalogs import CatalogService
 from agent_server.services.connector_presence import (
     with_effective_session_connector_status,
@@ -1059,6 +1061,11 @@ async def session_ws(
         await websocket.close(code=1008, reason="invalid ticket")
         return
     try:
+        await AuthSessions(db).check_connection(ticket.user_id, ticket.login_session_id, ticket.legacy_hash)
+    except SessionError:
+        await websocket.close(code=4401, reason="reauth_required")
+        return
+    try:
         await db.get_session(session_id, user_id=ticket.user_id)
     except KeyError:
         await websocket.close(code=1008, reason="session not found")
@@ -1142,6 +1149,7 @@ async def session_ws(
         await run_server_push_until_disconnect(
             websocket,
             send_session_updates(),
+            wait_for_auth_revocation(websocket, db, ticket.user_id, ticket.login_session_id, ticket.legacy_hash),
         )
     finally:
         await broker.unregister(session_id, queue)

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import time
+
+from agent_server.infra.db.schema import auth_sessions as auth_sessions_t
 from agent_server.infra.repositories.email_accounts import EmailAccountRepositoryMixin
 from agent_server.infra.repositories.store_support import *
 
@@ -165,6 +168,7 @@ class UserRepositoryMixin(EmailAccountRepositoryMixin):
         subject: str,
         email: str | None = None,
         display_name: str | None = None,
+        expected_auth_version: int | None = None,
     ) -> UserView:
         normalized = self.normalize_user_id(user_id)
         provider = (provider or "").strip().lower()
@@ -176,12 +180,14 @@ class UserRepositoryMixin(EmailAccountRepositoryMixin):
         now = utc_now()
         async with self._engine.begin() as conn:
             user = (
-                await conn.execute(select(users_t).where(users_t.c.id == normalized))
+                await conn.execute(select(users_t).where(users_t.c.id == normalized).with_for_update())
             ).mappings().first()
             if user is None:
                 raise KeyError(user_id)
             if user["disabled"]:
                 raise ValueError("user is disabled")
+            if expected_auth_version is not None and user["auth_version"] != expected_auth_version:
+                raise ValueError("login authorization revoked")
             existing = (
                 await conn.execute(
                     select(oauth_accounts_t.c.user_id).where(
@@ -318,10 +324,14 @@ class UserRepositoryMixin(EmailAccountRepositoryMixin):
             result = await conn.execute(
                 update(users_t)
                 .where(users_t.c.id == normalized)
-                .values(password_hash=stored_password, updated_at=now)
+                .values(password_hash=stored_password, updated_at=now, legacy_auth_revoked=1, auth_version=users_t.c.auth_version + 1)
             )
             if result.rowcount == 0:
                 raise KeyError(user_id)
+
+            await conn.execute(update(auth_sessions_t).where(auth_sessions_t.c.user_id == normalized).values(revoked_at=int(time.time())))
+            await conn.execute(update(oauth_authorization_codes_t).where(oauth_authorization_codes_t.c.user_id == normalized).values(consumed_at=now))
+            await conn.execute(update(mobile_login_tokens_t).where(mobile_login_tokens_t.c.user_id == normalized).values(consumed_at=now))
 
 
     async def record_mobile_login_token(
@@ -330,13 +340,19 @@ class UserRepositoryMixin(EmailAccountRepositoryMixin):
         token: str,
         user_id: str,
         expires_at: str,
+        expected_auth_version: int | None = None,
     ) -> None:
         normalized = (user_id or "").strip().lower()
-        await self.get_user(normalized)
+        user = await self.get_user(normalized)
         now = utc_now()
         async with self._engine.begin() as conn:
+            current = (await conn.execute(select(users_t.c.auth_version, users_t.c.disabled).where(users_t.c.id == normalized).with_for_update())).first()
+            expected = user.authVersion if expected_auth_version is None else expected_auth_version
+            if not current or current.disabled or current.auth_version != expected:
+                raise ValueError("login authorization revoked")
             await conn.execute(
                 insert(mobile_login_tokens_t).values(
+                    auth_version=expected,
                     token_hash=_mobile_login_token_hash(token),
                     user_id=normalized,
                     device_name=None,
@@ -438,12 +454,15 @@ class UserRepositoryMixin(EmailAccountRepositoryMixin):
                 or row["rejected_at"] is not None
             ):
                 return False
-            await conn.execute(
+            epoch = (await conn.execute(select(users_t.c.auth_version).where(users_t.c.id == normalized))).scalar_one_or_none()
+            if epoch != row["auth_version"]:
+                return False
+            consumed = await conn.execute(
                 update(mobile_login_tokens_t)
-                .where(mobile_login_tokens_t.c.token_hash == token_hash)
+                .where(mobile_login_tokens_t.c.token_hash == token_hash, mobile_login_tokens_t.c.consumed_at.is_(None))
                 .values(consumed_at=now)
             )
-            return True
+            return consumed.rowcount == 1
 
 
     async def update_user_role(self, user_id: str, role: UserRole) -> UserView:
@@ -493,8 +512,10 @@ class UserRepositoryMixin(EmailAccountRepositoryMixin):
             await conn.execute(
                 update(users_t)
                 .where(users_t.c.id == normalized)
-                .values(disabled=1 if disabled else 0, updated_at=now)
+                .values(disabled=1 if disabled else 0, updated_at=now, legacy_auth_revoked=1 if disabled else users_t.c.legacy_auth_revoked, auth_version=users_t.c.auth_version + (1 if disabled else 0))
             )
+            if disabled:
+                await conn.execute(update(auth_sessions_t).where(auth_sessions_t.c.user_id == normalized).values(revoked_at=int(time.time())))
         return await self.get_user(normalized)
 
 

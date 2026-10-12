@@ -3,15 +3,14 @@ from __future__ import annotations
 from fastapi import Depends, Header, HTTPException
 from starlette.requests import HTTPConnection
 
-from agent_server.core.auth import verify_user_access_token
 from agent_server.core.models import UserView
 from agent_server.infra.connector_gateway import ConnectorGateway
 from agent_server.infra.connector_rpc import ConnectorRpcManager
 from agent_server.infra.fs_downloads import FsDownloadRelayManager
 from agent_server.infra.repositories.facade import Store
+from agent_server.infra.terminal_broker import TerminalBroker
 from agent_server.infra.timeline_broker import TimelineBroker
 from agent_server.services.attachments import AttachmentService
-from agent_server.infra.terminal_broker import TerminalBroker
 from agent_server.services.catalogs import CatalogService
 from agent_server.services.connector_files import ConnectorFileService
 from agent_server.services.connector_ingest import ConnectorIngestService
@@ -139,26 +138,39 @@ def get_session_runtime_state_cache(
     return conn.app.state.session_runtime_state_cache
 
 
-def current_user_id(
+async def current_user_id(
     authorization: str | None = Header(None, alias="Authorization"),
+    db: Store = Depends(get_store),
 ) -> str:
-    """Lightweight: returns user id from the bearer token without DB lookup.
+    """Validate the bearer and its persistent login session before side effects.
 
-    Use this for endpoints that only need to know who the caller is. For
-    endpoints that need role / disabled, use current_user instead.
+    current_user additionally returns the profile and records platform activity.
     """
     prefix = "Bearer "
     if authorization is None or not authorization.startswith(prefix):
         raise HTTPException(status_code=401, detail="missing user access token")
-    user_id = verify_user_access_token(authorization[len(prefix) :])
-    if user_id is None:
-        raise HTTPException(status_code=401, detail="invalid user access token")
-    return user_id
+    from agent_server.services.auth_sessions import AuthSessions, SessionError
+    try:
+        claims = await AuthSessions(db).verify_access(authorization[len(prefix) :])
+    except SessionError as error:
+        # Keep the existing disabled-account status for old callers.
+        from agent_server.core.auth import verify_user_access_claims
+        signed = verify_user_access_claims(authorization[len(prefix) :])
+        if signed:
+            try:
+                user = await db.get_user(signed["sub"])
+                if user.disabled:
+                    raise HTTPException(status_code=403, detail="account disabled", headers={"X-AA-Auth-Error": "account_disabled"})
+            except KeyError:
+                pass
+        raise HTTPException(status_code=401, detail="invalid user access token", headers={"X-AA-Auth-Error": error.code}) from None
+    return claims["sub"]
 
 
 async def current_user(
     user_id: str = Depends(current_user_id),
     db: Store = Depends(get_store),
+    authorization: str | None = Header(None, alias="Authorization"),
 ) -> UserView:
     """Load the full user record. Rejects accounts that were disabled or deleted
     after the token was issued.
@@ -169,6 +181,14 @@ async def current_user(
         raise HTTPException(status_code=401, detail="user no longer exists") from None
     if user.disabled:
         raise HTTPException(status_code=403, detail="account disabled")
+    # The profile read must not launder a revoked request into a newer auth
+    # epoch if a password change occurred after the first bearer validation.
+    from agent_server.services.auth_sessions import AuthSessions, SessionError
+    if isinstance(authorization, str) and authorization.startswith("Bearer "):
+        try:
+            await AuthSessions(db).verify_access(authorization[7:])
+        except SessionError as error:
+            raise HTTPException(401, "reauth_required", headers={"X-AA-Auth-Error": error.code}) from None
     await db.record_platform_activity(user.userId)
     return user
 

@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.requests import HTTPConnection
 
+from agent_server.core.auth import verify_user_access_claims
 from agent_server.core.protocol import ProtocolWsTicketRequest, ProtocolWsTicketResponse
 from agent_server.core.utc import utc_now
 from agent_server.deps import current_user_id, get_store
 from agent_server.infra.repositories.facade import Store
 from agent_server.infra.ws_tickets import ClientWsTicketManager
+from agent_server.services.auth_sessions import digest
 
 router = APIRouter(tags=["client-ws"])
 
@@ -21,6 +23,7 @@ def get_ws_tickets(conn: HTTPConnection) -> ClientWsTicketManager:
 @router.post("/ws-ticket", response_model=ProtocolWsTicketResponse)
 async def create_ws_ticket(
     payload: ProtocolWsTicketRequest,
+    request: Request,
     user_id: Annotated[str, Depends(current_user_id)],
     db: Annotated[Store, Depends(get_store)],
     tickets: Annotated[ClientWsTicketManager, Depends(get_ws_tickets)],
@@ -39,5 +42,7 @@ async def create_ws_ticket(
         user_id=user_id,
         client_id=payload.clientId,
         scope=scope,
+        login_session_id=(verify_user_access_claims(request.headers.get("authorization", "")[7:], now=0) or {}).get("sid"),
+        legacy_hash=digest(request.headers.get("authorization", "")[7:]),
     )
     return ProtocolWsTicketResponse(ticket=ticket, expiresAt=expires_at, serverTime=utc_now())

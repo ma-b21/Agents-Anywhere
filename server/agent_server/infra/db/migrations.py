@@ -22,8 +22,8 @@ from agent_server.infra.db.engine import POSTGRES_BACKEND, resolve_db_url
 
 LEGACY_V1_REVISION = "v1_legacy"
 BASELINE_V2_REVISION = "v2_0"
-CURRENT_SCHEMA_REVISION = "v2_35"
-CURRENT_SCHEMA_VERSION = "2.35"
+CURRENT_SCHEMA_REVISION = "v2_36"
+CURRENT_SCHEMA_VERSION = "2.36"
 POSTGRES_MIGRATION_LOCK_ID = 0x414147454E545332
 DEFAULT_MIGRATION_LOCK_TIMEOUT_SECONDS = 120.0
 
@@ -393,6 +393,11 @@ def _classify_sync(connection) -> UnversionedDatabase:
                                 revision = "v2_32"
                                 if "runtime_control_version" not in connector_columns:
                                     revision = "v2_33"
+                                    auth_tables = {"auth_sessions", "auth_refresh_history", "auth_session_upgrades"}
+                                    if auth_tables & tables or "auth_version" in user_columns or "legacy_auth_revoked" in user_columns:
+                                        if not (auth_tables.issubset(tables) and {"auth_version", "legacy_auth_revoked"}.issubset(user_columns) and "source_sid" in _column_names(inspector, "auth_session_upgrades") and "auth_version" in _column_names(inspector, "oauth_authorization_codes") and "auth_version" in _column_names(inspector, "mobile_login_tokens")):
+                                            return UnversionedDatabase("unknown")
+                                        revision = "v2_36"
                         else:
                             return UnversionedDatabase("unknown")
                     elif connector_kind_layout:

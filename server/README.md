@@ -131,6 +131,15 @@ curl http://127.0.0.1:8000/api/v2/health/ready
 | `AGENT_SERVER_FILES_S3_ENDPOINT_URL` | Optional S3-compatible endpoint URL. |
 | `AGENT_SERVER_FILES_S3_VIRTUAL_HOST_STYLE` | Set to `true` for virtual-host-style S3 URLs. |
 | `AGENT_SERVER_SECRET` | Secret used for signed auth tokens. Set this outside local dev. |
+| `AGENT_SERVER_SESSION_ACCESS_SECONDS` | New-protocol access lifetime; defaults to 604800 (7 days) during rollout. After all clients are upgraded, set to 900. Legacy clients keep 7 days. |
+| `AGENT_SERVER_SESSION_IDLE_SECONDS` | Sliding session inactivity limit; defaults to 2592000 (30 days). Only successful refresh renews it. |
+| `AGENT_SERVER_SESSION_MAX_SECONDS` | Absolute session limit; defaults to 7776000 (90 days). 0 disables it for native clients only; browser cookies remain limited to 90 days. |
+| `AGENT_SERVER_REFRESH_RECOVERY_SECONDS` | Same-attempt native refresh response recovery window; defaults to 120. Retries do not extend this window. |
+| `AGENT_SERVER_REFRESH_ENCRYPTION_KEYS` | Comma-separated Fernet keys, newest first, to encrypt bounded recovery responses. Keep old keys during the recovery window. Default is domain-separated derivation from AGENT_SERVER_SECRET; independent keys are recommended. |
+| `AGENT_SERVER_LEGACY_UPGRADE_UNTIL` | Optional UNIX epoch override for legacy access upgrade. Default is the fixed 30-day deadline recorded by migration v2_36, not extended at startup. 0 disables upgrades. |
+| `AGENT_SERVER_PUBLIC_ORIGIN` | Exact externally visible HTTPS API origin for browser CSRF checks behind a trusted reverse proxy. Additional explicit CORS origins are allowed. |
+| `AGENT_SERVER_REFRESH_IP_PER_MINUTE` / `AGENT_SERVER_REFRESH_CREDENTIAL_PER_MINUTE` | Refresh limits, default 120 / 60. Shared across workers with Redis; bounded in-memory fallback for single-process development. 429 does not revoke sessions. |
+| `AGENT_SERVER_WS_AUTH_CHECK_SECONDS` | Active WebSocket session revalidation interval, default 1 second. Revocation closes affected connections; ordinary access expiration does not. |
 | `AGENT_SERVER_SETUP_TOKEN_TTL` | First-run setup token TTL in seconds. |
 | `AGENT_SERVER_PUBLIC_ORIGIN` | Public Web origin used for OAuth redirect URLs when reverse-proxy headers or `returnTo` are unavailable. Example: `https://agents.example.com`. |
 | `AGENT_SERVER_CORS_ORIGINS` | Comma-separated explicit CORS origins. |
@@ -238,7 +247,7 @@ The `/client-releases/check` and `/admin/client-releases` APIs and the release
 management page have been retired.
 
 The release-table retirement was introduced in `v2_32`. Existing deployments
-must apply the full current chain through `v2_35` before restart:
+must apply the full current chain through `v2_36` before restart:
 
 ```bash
 uv run python -m agent_server.infra.db.migrations upgrade
@@ -246,3 +255,34 @@ uv run python -m agent_server.infra.db.migrations upgrade
 
 It archives the former release table as `_deprecated_app_releases`; historical
 release data is retained without a runtime release API.
+
+## Renewable user sessions (v2_36)
+
+Back up the database and configure a stable AGENT_SERVER_SECRET before migration.
+Deploy this server first with the default seven-day access TTL, then upgrade
+Android, Desktop and Web. Native PKCE/QR clients explicitly request refresh
+protocol 1. After the rollout is verified, reduce
+AGENT_SERVER_SESSION_ACCESS_SECONDS to 900. Connector machine credentials and
+external providers are unchanged.
+
+Native refresh credentials are single-use opaque secrets. Persist the refresh
+attempt ID before sending, and reuse it after an ambiguous network failure.
+Only the same attempt can recover the same response within the bounded window;
+replay using another attempt revokes that login family. Temporary 429/5xx or
+network failures do not revoke login.
+
+Browser sessions require HTTPS (localhost is allowed for development), explicit
+trusted origins, cookie credentials, bootstrap CSRF and expected session IDs.
+The first-party HttpOnly cookie is not rotated during refresh; login/account
+switch/logout must be coordinated across tabs. Browser refresh does not expose
+the cookie secret in JSON. The initial browser session has a finite absolute cap.
+
+Password changes invalidate existing login sessions and pending native OAuth/QR
+authorizations. User disabling does not make old logins valid again on re-enable.
+Active WebSockets revalidate the database at the configured interval. Ordinary
+access expiration does not close an otherwise-valid connection.
+
+Rolling back application code alone removes session-revocation enforcement.
+Prefer a coordinated maintenance rollback with a verified backup; rotate auth
+and recovery keys and require users to log in again. Do not silently downgrade
+the database or restore consumed refresh credentials while newer servers run.

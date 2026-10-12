@@ -18,9 +18,7 @@ from agent_server.api.connector_common import (
     require_owned_connector,
     require_owned_online_connector,
 )
-from agent_server.core.auth import (
-    verify_user_access_token,
-)
+from agent_server.api.server_push_websocket import receive_authenticated_json
 from agent_server.core.models import (
     RpcResponsePayload,
     TerminalCreateRequest,
@@ -42,6 +40,7 @@ from agent_server.deps import (
 from agent_server.infra.connector_rpc import ConnectorRpcManager
 from agent_server.infra.repositories.facade import Store
 from agent_server.infra.terminal_broker import TerminalBroker, TerminalRelayError
+from agent_server.services.auth_sessions import AuthSessions, SessionError, digest
 from agent_server.services.connector_rpc import ConnectorUpstreamError
 from agent_server.services.terminal import (
     TerminalService,
@@ -515,10 +514,13 @@ async def connector_terminal_stream_v2(
     if not token:
         await websocket.close(code=4401)
         return
-    user_id = verify_user_access_token(urllib.parse.unquote(token))
-    if user_id is None:
+    authentication = AuthSessions(websocket.app.state.store)
+    try:
+        claims = await authentication.verify_access(urllib.parse.unquote(token))
+    except SessionError:
         await websocket.close(code=4401)
         return
+    user_id = claims["sub"]
 
     db: Store = websocket.app.state.store
     try:
@@ -583,7 +585,7 @@ async def connector_terminal_stream_v2(
             )
 
         while True:
-            message = await websocket.receive_json()
+            message = await receive_authenticated_json(websocket, authentication, user_id, claims.get("sid"), digest(urllib.parse.unquote(token)))
             mtype = message.get("type")
             if mtype == "input":
                 data_b64 = message.get("data")
@@ -641,10 +643,13 @@ async def connector_terminal_stream(
     if not token:
         await websocket.close(code=4401)
         return
-    user_id = verify_user_access_token(urllib.parse.unquote(token))
-    if user_id is None:
+    authentication = AuthSessions(websocket.app.state.store)
+    try:
+        claims = await authentication.verify_access(urllib.parse.unquote(token))
+    except SessionError:
         await websocket.close(code=4401)
         return
+    user_id = claims["sub"]
 
     db: Store = websocket.app.state.store
     broker: TerminalBroker = websocket.app.state.terminal_broker
@@ -666,7 +671,7 @@ async def connector_terminal_stream(
     await broker.send_to_connector(terminal_id, {"type": "attach"})
     try:
         while True:
-            message = await websocket.receive_json()
+            message = await receive_authenticated_json(websocket, authentication, user_id, claims.get("sid"), digest(urllib.parse.unquote(token)))
             mtype = message.get("type")
             if mtype == "input":
                 data_b64 = message.get("data")

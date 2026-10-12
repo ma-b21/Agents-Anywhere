@@ -105,3 +105,24 @@ def test_external_cancellation_still_propagates() -> None:
             await stream_task
 
     asyncio.run(exercise())
+
+
+def test_auth_revocation_stops_outbound_and_disconnect_tasks() -> None:
+    async def exercise() -> None:
+        websocket = FakeWebSocket()
+        cancelled = asyncio.Event()
+
+        async def outbound() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        async def guard() -> None:
+            await asyncio.sleep(0)
+
+        await run_server_push_until_disconnect(cast(WebSocket, websocket), outbound(), guard())
+        await asyncio.sleep(0)
+        assert cancelled.is_set()
+
+    asyncio.run(exercise())

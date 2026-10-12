@@ -167,6 +167,8 @@ users = Table(
     Column("password_hash", Text, nullable=False),
     Column("role", Text, nullable=False, server_default="member"),
     Column("disabled", Integer, nullable=False, server_default="0"),
+    Column("legacy_auth_revoked", Integer, nullable=False, server_default="0"),
+    Column("auth_version", Integer, nullable=False, server_default="0"),
     Column("email", Text),
     Column("email_verified_at", Text),
     Column("display_name", Text, nullable=False, server_default=""),
@@ -178,6 +180,44 @@ users = Table(
     Column("updated_at", Text, nullable=False),
 )
 
+
+auth_sessions = Table(
+    "auth_sessions", metadata,
+    Column("id", Text, primary_key=True),
+    Column("user_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+    Column("client_id", Text, nullable=False),
+    Column("transport", Text, nullable=False),
+    Column("scope", Text, nullable=False, server_default=""),
+    Column("credential_hash", Text, nullable=False, unique=True),
+    Column("generation", Integer, nullable=False),
+    Column("created_at", BigInteger, nullable=False),
+    Column("idle_expires_at", BigInteger, nullable=False),
+    Column("absolute_expires_at", BigInteger),
+    Column("revoked_at", BigInteger),
+    Index("idx_auth_sessions_user", "user_id"),
+)
+
+auth_refresh_history = Table(
+    "auth_refresh_history", metadata,
+    Column("credential_hash", Text, primary_key=True),
+    Column("session_id", Text, ForeignKey("auth_sessions.id", ondelete="CASCADE"), nullable=False),
+    Column("attempt_hash", Text, nullable=False),
+    Column("generation", Integer, nullable=False),
+    Column("recover_until", BigInteger, nullable=False),
+    Column("response_encrypted", Text, nullable=False),
+    Index("idx_auth_refresh_history_session", "session_id"),
+)
+
+auth_session_upgrades = Table(
+    "auth_session_upgrades", metadata,
+    Column("key", Text, primary_key=True),
+    Column("legacy_hash", Text, nullable=False),
+    Column("source_sid", Text),
+    Column("session_id", Text, ForeignKey("auth_sessions.id", ondelete="CASCADE"), nullable=False),
+    Column("recover_until", BigInteger, nullable=False),
+    Column("response_encrypted", Text, nullable=False),
+    Index("idx_auth_session_upgrades_legacy", "legacy_hash"),
+)
 
 email_verification_codes = Table(
     "email_verification_codes",
@@ -249,6 +289,7 @@ oauth_authorization_codes = Table(
     "oauth_authorization_codes",
     metadata,
     Column("code_hash", Text, primary_key=True),
+    Column("auth_version", Integer, nullable=False, server_default="0"),
     Column("client_id", Text, nullable=False),
     Column("user_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
     Column("redirect_uri", Text, nullable=False),
@@ -265,6 +306,7 @@ mobile_login_tokens = Table(
     "mobile_login_tokens",
     metadata,
     Column("token_hash", Text, primary_key=True),
+    Column("auth_version", Integer, nullable=False, server_default="0"),
     Column("user_id", Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
     Column("device_name", Text),
     Column("expires_at", Text, nullable=False),

@@ -17,7 +17,6 @@ from agent_server.core.api_namespace import api_v2_path
 from agent_server.core.auth import (
     create_signed_token,
     verify_signed_token,
-    verify_user_access_token,
 )
 from agent_server.core.models import (
     FsPreviewReadRequest,
@@ -305,7 +304,7 @@ async def connector_fs_transfer_download(
             raise HTTPException(status_code=404, detail="transfer not found")
         user_id = preview["user_id"]
     else:
-        user_id = _user_id_from_authorization(authorization)
+        user_id = await _user_id_from_authorization(authorization, store)
     await require_owned_online_connector(connector_id, user_id, store, manager)
     if transfer is None or transfer.connector_id != connector_id:
         raise HTTPException(status_code=404, detail="transfer not found")
@@ -405,14 +404,15 @@ def _safe_header_value(value: str) -> str:
     return value.encode("latin-1", errors="replace").decode("latin-1")
 
 
-def _user_id_from_authorization(authorization: str | None) -> str:
+async def _user_id_from_authorization(authorization: str | None, store) -> str:
     prefix = "Bearer "
     if authorization is None or not authorization.startswith(prefix):
         raise HTTPException(status_code=401, detail="missing user access token")
-    user_id = verify_user_access_token(authorization[len(prefix) :])
-    if user_id is None:
-        raise HTTPException(status_code=401, detail="invalid user access token")
-    return user_id
+    from agent_server.services.auth_sessions import AuthSessions, SessionError
+    try:
+        return (await AuthSessions(store).verify_access(authorization[len(prefix) :]))["sub"]
+    except SessionError:
+        raise HTTPException(status_code=401, detail="invalid user access token") from None
 
 
 def _fs_preview_access_payload(token: str) -> dict[str, str]:

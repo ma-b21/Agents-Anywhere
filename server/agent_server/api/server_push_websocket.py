@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Coroutine
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -55,6 +56,7 @@ async def wait_for_websocket_disconnect(websocket: WebSocket) -> None:
 async def run_server_push_until_disconnect(
     websocket: WebSocket,
     outbound_stream: Coroutine[object, object, None],
+    authentication: Coroutine[object, object, None] | None = None,
 ) -> None:
     """Run an outbound stream while monitoring the client connection.
 
@@ -65,13 +67,22 @@ async def run_server_push_until_disconnect(
 
     outbound_task = asyncio.create_task(outbound_stream)
     disconnect_task = asyncio.create_task(wait_for_websocket_disconnect(websocket))
-    tasks = (outbound_task, disconnect_task)
+    auth_task = asyncio.create_task(authentication) if authentication is not None else None
+    tasks = (outbound_task, disconnect_task) + ((auth_task,) if auth_task else ())
 
     try:
         completed, _pending = await asyncio.wait(
             tasks,
             return_when=asyncio.FIRST_COMPLETED,
         )
+
+        if auth_task is not None and auth_task in completed:
+            cancel_websocket_task(outbound_task)
+            cancel_websocket_task(disconnect_task)
+            auth_task.result()
+            return
+        if auth_task is not None:
+            cancel_websocket_task(auth_task)
 
         if disconnect_task in completed:
             try:
@@ -103,3 +114,32 @@ def complete_outbound_stream(outbound_task: asyncio.Task[None]) -> None:
         if is_closed_websocket_send_error(error):
             return
         raise
+
+
+async def wait_for_auth_revocation(websocket, db, user_id, login_session_id=None, legacy_hash=None):
+    from agent_server.services.auth_sessions import AuthSessions, SessionError
+    service = AuthSessions(db)
+    while True:
+        await asyncio.sleep(max(0.1, float(os.environ.get("AGENT_SERVER_WS_AUTH_CHECK_SECONDS", "1"))))
+        try:
+            await service.check_connection(user_id, login_session_id, legacy_hash)
+        except SessionError:
+            await websocket.close(code=4401, reason="reauth_required")
+            return
+
+
+async def receive_authenticated_json(websocket, authentication, user_id, session_id=None, legacy_hash=None):
+    """Revalidate idle terminals and every input, not the original access expiry."""
+    from agent_server.services.auth_sessions import SessionError
+    while True:
+        try:
+            try:
+                message = await asyncio.wait_for(websocket.receive_json(), timeout=1.0)
+            except TimeoutError:
+                await authentication.check_connection(user_id, session_id, legacy_hash)
+                continue
+            await authentication.check_connection(user_id, session_id, legacy_hash)
+            return message
+        except SessionError:
+            await websocket.close(code=4401, reason="reauth_required")
+            raise WebSocketDisconnect(code=4401) from None

@@ -105,9 +105,11 @@ def hash_password_verifier(verifier: str, *, salt: str) -> str:
     return f"pbkdf2_sha256${salt}${verifier}"
 
 
-def create_user_access_token(user_id: str, expires_in: int = DEFAULT_USER_EXPIRES_IN) -> str:
+def create_user_access_token(user_id: str, expires_in: int = DEFAULT_USER_EXPIRES_IN, *, session_id: str | None = None, issued_at: int | None = None) -> str:
     header = {"alg": "HS256", "typ": "JWT"}
-    payload = {"sub": user_id, "exp": int(time.time()) + expires_in}
+    payload = {"sub": user_id, "exp": (int(time.time()) if issued_at is None else issued_at) + expires_in}
+    if session_id:
+        payload["sid"] = session_id
     signing_input = f"{_b64_json(header)}.{_b64_json(payload)}"
     signature = _b64_bytes(hmac.new(_secret(), signing_input.encode("utf-8"), hashlib.sha256).digest())
     return f"{signing_input}.{signature}"
@@ -137,6 +139,11 @@ def verify_signed_token(kind: str, token: str) -> dict[str, Any] | None:
 
 
 def verify_user_access_token(token: str) -> str | None:
+    data = verify_user_access_claims(token)
+    return data["sub"] if data else None
+
+
+def verify_user_access_claims(token: str, *, now: int | None = None) -> dict[str, Any] | None:
     try:
         header, payload, signature = token.split(".", 2)
         expected = _b64_bytes(hmac.new(_secret(), f"{header}.{payload}".encode("utf-8"), hashlib.sha256).digest())
@@ -145,10 +152,10 @@ def verify_user_access_token(token: str) -> str | None:
         data = json.loads(_b64_decode(payload).decode("utf-8"))
     except (ValueError, json.JSONDecodeError):
         return None
-    if int(data.get("exp") or 0) < int(time.time()):
+    if not isinstance(data, dict) or not isinstance(data.get("exp"), int) or data["exp"] <= (int(time.time()) if now is None else now):
         return None
     subject = data.get("sub")
-    return subject if isinstance(subject, str) and subject else None
+    return data if isinstance(subject, str) and subject else None
 
 
 def _b64_json(value: dict[str, Any]) -> str:

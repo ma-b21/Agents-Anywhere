@@ -709,7 +709,7 @@ def test_oauth_metadata_advertises_authorization_code_pkce(tmp_path):
     body = client.get("/.well-known/oauth-authorization-server").json()
     assert body["authorization_endpoint"].endswith("/api/v2/oauth/authorize")
     assert body["token_endpoint"].endswith("/api/v2/oauth/token")
-    assert body["grant_types_supported"] == ["authorization_code"]
+    assert body["grant_types_supported"] == ["authorization_code", "refresh_token"]
     assert body["code_challenge_methods_supported"] == ["S256"]
 
 

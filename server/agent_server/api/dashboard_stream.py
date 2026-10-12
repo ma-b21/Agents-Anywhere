@@ -9,6 +9,7 @@ from starlette.requests import HTTPConnection
 
 from agent_server.api.server_push_websocket import (
     run_server_push_until_disconnect,
+    wait_for_auth_revocation,
 )
 from agent_server.core.device_runtime import DeviceRuntimeView
 from agent_server.core.utc import utc_now
@@ -22,6 +23,7 @@ from agent_server.infra.connector_rpc import ConnectorRpcManager
 from agent_server.infra.repositories.facade import Store
 from agent_server.infra.timeline_broker import TimelineBroker
 from agent_server.infra.ws_tickets import ClientWsTicketManager
+from agent_server.services.auth_sessions import AuthSessions, SessionError
 from agent_server.services.connector_presence import (
     with_effective_connector_statuses,
 )
@@ -111,6 +113,12 @@ async def dashboard_ws(
         await websocket.close(code=1008, reason="invalid ticket")
         return
 
+    try:
+        await AuthSessions(db).check_connection(ticket.user_id, ticket.login_session_id, ticket.legacy_hash)
+    except SessionError:
+        await websocket.close(code=4401, reason="reauth_required")
+        return
+
     await websocket.accept()
     queue = await broker.register_dashboard(ticket.user_id)
 
@@ -157,6 +165,7 @@ async def dashboard_ws(
         await run_server_push_until_disconnect(
             websocket,
             send_dashboard_updates(),
+            wait_for_auth_revocation(websocket, db, ticket.user_id, ticket.login_session_id, ticket.legacy_hash),
         )
     finally:
         await broker.unregister_dashboard(ticket.user_id, queue)

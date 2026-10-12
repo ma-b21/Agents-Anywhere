@@ -230,6 +230,7 @@ class AuthPasswordSaltResponse(BaseModel):
 
 class UserView(BaseModel):
     userId: str
+    authVersion: int = Field(0, exclude=True)
     email: str | None = None
     emailVerified: bool = False
     displayName: str = ""
@@ -249,6 +250,15 @@ class AuthResponse(BaseModel):
     accessToken: str
     tokenType: str = "bearer"
     serverTime: str
+    sessionId: str | None = None
+    accessExpiresAt: str | None = None
+    accessExpiresIn: int | None = None
+    refreshToken: str | None = None
+    refreshExpiresAt: str | None = None
+    idleExpiresAt: str | None = None
+    absoluteExpiresAt: str | None = None
+    credentialVersion: int | None = None
+    refreshProtocolVersion: int = 1
 
 
 class AuthMeResponse(BaseModel):
@@ -263,6 +273,7 @@ class AuthMeResponse(BaseModel):
 
 
 class AuthConfigResponse(BaseModel):
+    refreshProtocolVersion: int = 1
     emailVerificationRequired: bool = False
     needsBootstrap: bool
     registrationOpen: bool
@@ -539,6 +550,15 @@ class OAuthTokenResponse(BaseModel):
     expires_in: int
     scope: str = ""
     refresh_token: str | None = None
+    session_id: str | None = None
+    user_id: str | None = None
+    access_expires_at: str | None = None
+    refresh_expires_at: str | None = None
+    idle_expires_at: str | None = None
+    absolute_expires_at: str | None = None
+    credential_version: int | None = None
+    server_time: str | None = None
+    refresh_protocol_version: int = 1
 
 
 class OAuthAuthorizeRequest(BaseModel):
@@ -600,6 +620,7 @@ class MobileLoginConfirmRequest(BaseModel):
 class MobileLoginExchangeRequest(BaseModel):
     userId: str
     loginToken: str
+    refreshProtocolVersion: int = 0
 
 
 class MobileLoginExchangeResponse(BaseModel):

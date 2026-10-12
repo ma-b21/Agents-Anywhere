@@ -61,6 +61,7 @@ class OAuthRepositoryMixin:
         scope: str,
         code_challenge: str,
         code_challenge_method: str,
+        expected_auth_version: int | None = None,
     ) -> str:
         redirect_uri = _normalize_redirect_uri(redirect_uri)
         first_party_client = first_party_oauth_client(client_id)
@@ -75,12 +76,16 @@ class OAuthRepositoryMixin:
             raise ValueError("code challenge method must be S256")
         if not code_challenge:
             raise ValueError("code challenge is required")
-        await self.get_user(user_id)
+        user = await self.get_user(user_id)
         code = secrets.token_urlsafe(32)
         now_dt = datetime.now(UTC)
         now = now_dt.isoformat().replace("+00:00", "Z")
         expires_at = (now_dt + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
         async with self._engine.begin() as conn:
+            current = (await conn.execute(select(users_t.c.auth_version, users_t.c.disabled).where(users_t.c.id == user_id).with_for_update())).first()
+            expected = user.authVersion if expected_auth_version is None else expected_auth_version
+            if not current or current.disabled or current.auth_version != expected:
+                raise ValueError("login authorization revoked")
             if first_party_client is not None:
                 existing_client = (
                     await conn.execute(
@@ -99,6 +104,7 @@ class OAuthRepositoryMixin:
                     )
             await conn.execute(
                 insert(oauth_authorization_codes_t).values(
+                    auth_version=expected,
                     code_hash=_oauth_code_hash(code),
                     client_id=client_id,
                     user_id=user_id,
@@ -155,7 +161,11 @@ class OAuthRepositoryMixin:
                 raise ValueError("invalid authorization code")
             user_id = row["user_id"]
             scope = row["scope"]
-        return await self.get_user(user_id), scope
+            auth_version = row["auth_version"]
+        user = await self.get_user(user_id)
+        if user.authVersion != auth_version or user.disabled:
+            raise ValueError("invalid authorization code")
+        return user, scope
 
 
 def _oauth_client_from_row(row: Any) -> OAuthClientView:

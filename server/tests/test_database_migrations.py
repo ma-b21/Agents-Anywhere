@@ -73,6 +73,33 @@ def test_runtime_database_url_is_required(monkeypatch) -> None:
         resolve_db_url()
 
 
+def test_auth_migration_round_trip_preserves_users(tmp_path) -> None:
+    path = tmp_path / "auth-migration.sqlite3"
+    url = _sqlite_url(path)
+    upgrade_database(db_url=url, revision="v2_35")
+    engine = create_engine(f"sqlite:///{path}")
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO users(id, password_hash, role, disabled, created_at, updated_at) VALUES ('test-user', 'fake-hash', 'member', 0, 'now', 'now')"))
+        upgrade_database(db_url=url)
+        assert inspect(engine).has_table("auth_sessions")
+        with engine.connect() as conn:
+            cutoff = conn.execute(text("SELECT value FROM instance_settings WHERE key='auth_legacy_upgrade_until'")).scalar_one()
+            assert conn.execute(text("SELECT legacy_auth_revoked FROM users WHERE id='test-user'")).scalar_one() == 0
+        upgrade_database(db_url=url)
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT value FROM instance_settings WHERE key='auth_legacy_upgrade_until'")).scalar_one() == cutoff
+        command.downgrade(_alembic_config(url), "v2_35")
+        assert not inspect(engine).has_table("auth_sessions")
+        assert "legacy_auth_revoked" not in {column["name"] for column in inspect(engine).get_columns("users")}
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT id FROM users")).scalar_one() == "test-user"
+        upgrade_database(db_url=url)
+        assert inspect(engine).has_table("auth_sessions")
+    finally:
+        engine.dispose()
+
+
 def test_runtime_sqlite_environment_is_rejected(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("AGENT_SERVER_DB_URL", _sqlite_url(tmp_path / "runtime.sqlite3"))
     monkeypatch.delenv("AGENT_SERVER_DB_BACKEND", raising=False)
@@ -1125,9 +1152,9 @@ def test_unversioned_runtime_schema_is_classified_by_actual_columns(
     )
 
 
-def test_current_schema_version_is_v2_35() -> None:
-    assert CURRENT_SCHEMA_REVISION == "v2_35"
-    assert CURRENT_SCHEMA_VERSION == "2.35"
+def test_current_schema_version_is_v2_36() -> None:
+    assert CURRENT_SCHEMA_REVISION == "v2_36"
+    assert CURRENT_SCHEMA_VERSION == "2.36"
 
 
 def test_retiring_releases_preserves_history(tmp_path) -> None:
@@ -2159,6 +2186,12 @@ def _create_legacy_v1_database(path) -> None:
         # Current metadata contains tables and columns introduced after v1.
         # Remove them before constructing the historical legacy fixture so
         # their real Alembic revisions can create them during the upgrade.
+        connection.execute(text("DROP TABLE auth_session_upgrades"))
+        connection.execute(text("DROP TABLE auth_refresh_history"))
+        connection.execute(text("DROP TABLE auth_sessions"))
+        connection.execute(text("ALTER TABLE users DROP COLUMN legacy_auth_revoked"))
+        for table in ("users", "oauth_authorization_codes", "mobile_login_tokens"):
+            connection.execute(text(f"ALTER TABLE {table} DROP COLUMN auth_version"))
         connection.execute(text("DROP TABLE email_verification_codes"))
         connection.execute(text("DROP TABLE email_verification_limits"))
         connection.execute(text("DROP INDEX idx_users_email"))

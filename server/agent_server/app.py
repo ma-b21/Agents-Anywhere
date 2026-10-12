@@ -21,6 +21,7 @@ from agent_server.api import (
     agents,
     announcements,
     auth,
+    auth_session,
     client_ws,
     connector_files,
     connector_ingress,
@@ -117,6 +118,15 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        from agent_server.services.auth_sessions import AuthSessions
+        async def cleanup_auth_sessions():
+            while True:
+                try:
+                    await AuthSessions(app.state.store).cleanup()
+                except Exception:
+                    logger.exception("login session cleanup failed")
+                await asyncio.sleep(3600)
+        cleanup_task = None
         presence_task: asyncio.Task[None] | None = None
         deletion_task: asyncio.Task[None] | None = None
         try:
@@ -136,11 +146,15 @@ def create_app(
             await app.state.rpc.start()
             presence_task = asyncio.create_task(_connector_presence_watchdog(app))
             deletion_task = asyncio.create_task(app.state.connector_deletion_recovery.run())
+            cleanup_task = asyncio.create_task(cleanup_auth_sessions())
             # Generate the bootstrap token early so operators see it in logs.
             if await app.state.store.count_users() == 0:
                 await SetupTokenService(app.state.setup_token, app.state.redis).snapshot()
             yield
         finally:
+            if cleanup_task is not None:
+                cleanup_task.cancel()
+                await asyncio.gather(cleanup_task, return_exceptions=True)
             if deletion_task is not None:
                 deletion_task.cancel()
                 await asyncio.gather(deletion_task, return_exceptions=True)
@@ -189,6 +203,8 @@ def create_app(
         ),
         allow_methods=["*"],
         allow_headers=["*"],
+        allow_credentials=True,
+        expose_headers=["X-AA-Auth-Error"],
     )
     should_migrate = (
         db_path is not None if migrate_database is None else migrate_database
@@ -328,6 +344,7 @@ def create_app(
         )
 
     app.include_router(auth.router, prefix=API_V2_PREFIX)
+    app.include_router(auth_session.router, prefix=API_V2_PREFIX)
     app.include_router(admin.router, prefix=API_V2_PREFIX)
     app.include_router(announcements.router, prefix=API_V2_PREFIX)
     app.include_router(announcements.admin_router, prefix=API_V2_PREFIX)

@@ -6,13 +6,13 @@ import secrets
 import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 
+from agent_server.api.auth_session import finish_auth, validate_auth_csrf
 from agent_server.core.api_namespace import api_v2_path
 from agent_server.core.auth import (
     create_signed_token,
-    create_user_access_token,
     hash_password_verifier,
     verify_signed_token,
 )
@@ -49,6 +49,7 @@ from agent_server.infra.repositories.email_accounts import (
     normalize_email,
 )
 from agent_server.infra.repositories.facade import Store
+from agent_server.services.auth_sessions import AuthSessions, SessionError
 from agent_server.services.email_delivery import (
     EmailDeliveryError,
     get_email_settings,
@@ -122,7 +123,7 @@ async def auth_password_salt(
 
 @router.post("/auth/register", response_model=AuthResponse)
 async def auth_register(
-    payload: AuthRequest, request: Request, db: Store = Depends(get_store)
+    payload: AuthRequest, request: Request, response: Response, db: Store = Depends(get_store)
 ) -> AuthResponse:
     """Self-service registration with gating:
 
@@ -131,6 +132,7 @@ async def auth_register(
     - If users exist and registration_open is true: new user is a member.
     - Otherwise: 403.
     """
+    await validate_auth_csrf(request, db)
     # Pre-check rather than relying on bootstrap_first_admin's None return —
     # we want to reject before touching the DB when the setup token is wrong.
     if await db.count_users() == 0:
@@ -156,7 +158,7 @@ async def auth_register(
 
     if bootstrap_user is not None:
         await _setup_token(request).consume()
-        return _auth_response(bootstrap_user)
+        return await finish_auth(bootstrap_user, db, request, response)
 
     if not await db.is_registration_open():
         raise HTTPException(status_code=403, detail="registration is closed")
@@ -173,11 +175,12 @@ async def auth_register(
         )
     except ValueError as exc:
         raise _value_error_to_http(exc) from exc
-    return _auth_response(user)
+    return await finish_auth(user, db, request, response)
 
 
 @router.post("/auth/login", response_model=AuthResponse)
-async def auth_login(payload: AuthRequest, db: Store = Depends(get_store)) -> AuthResponse:
+async def auth_login(payload: AuthRequest, request: Request, response: Response, db: Store = Depends(get_store)) -> AuthResponse:
+    await validate_auth_csrf(request, db)
     try:
         user = await db.verify_email_user(
             email=payload.email, password=payload.password, verifier=payload.passwordVerifier,
@@ -186,7 +189,7 @@ async def auth_login(payload: AuthRequest, db: Store = Depends(get_store)) -> Au
         raise _value_error_to_http(exc) from exc
     if user is None:
         raise HTTPException(status_code=401, detail="invalid credentials")
-    return _auth_response(user)
+    return await finish_auth(user, db, request, response)
 
 
 @router.post("/auth/email-code", response_model=EmailCodeResponse)
@@ -195,7 +198,7 @@ async def send_email_code(
 ) -> EmailCodeResponse:
     user = None
     if request.headers.get("authorization"):
-        user = await current_user(current_user_id(request.headers.get("authorization")), db)
+        user = await current_user(await current_user_id(request.headers.get("authorization"), db), db, request.headers.get("authorization"))
     if payload.purpose == "bind" and user is None:
         raise HTTPException(status_code=401, detail="authentication required")
     if payload.purpose == "register":
@@ -332,14 +335,17 @@ async def oauth_callback(
 @router.post("/auth/oauth/finalize", response_model=OAuthFinalizeResponse)
 async def oauth_finalize(
     payload: OAuthFinalizeRequest,
+    request: Request,
+    response: Response,
     db: Store = Depends(get_store),
 ) -> OAuthFinalizeResponse:
+    await validate_auth_csrf(request, db)
     identity = verify_pending_token(payload.pendingToken)
     if identity is None:
         raise HTTPException(status_code=401, detail="oauth session expired")
     existing = await db.oauth_user_for_subject(provider=identity.provider, subject=identity.subject)
     if existing is not None:
-        return OAuthFinalizeResponse(auth=_auth_response(existing), serverTime=utc_now())
+        return OAuthFinalizeResponse(auth=await finish_auth(existing, db, request, response), serverTime=utc_now())
     try:
         email = normalize_email(payload.email or "")
         target = await db.user_for_email(email)
@@ -352,8 +358,10 @@ async def oauth_finalize(
             user = await db.bind_oauth_account(
                 user_id=verified.userId, provider=identity.provider, subject=identity.subject,
                 email=identity.email, display_name=identity.display_name,
+                expected_auth_version=verified.authVersion,
             )
-            return OAuthFinalizeResponse(auth=_auth_response(user), serverTime=utc_now())
+            user.authVersion = verified.authVersion
+            return OAuthFinalizeResponse(auth=await finish_auth(user, db, request, response), serverTime=utc_now())
         if not await db.is_oauth_registration_open():
             raise HTTPException(status_code=403, detail="oauth registration is closed")
         password_hash = _password_hash_from_oauth_finalize(payload)
@@ -369,7 +377,7 @@ async def oauth_finalize(
         )
     except ValueError as exc:
         raise _value_error_to_http(exc) from exc
-    return OAuthFinalizeResponse(auth=_auth_response(user), serverTime=utc_now())
+    return OAuthFinalizeResponse(auth=await finish_auth(user, db, request, response), serverTime=utc_now())
 
 
 @router.get("/auth/me", response_model=AuthMeResponse)
@@ -446,11 +454,15 @@ async def create_mobile_login_qr(
         },
         MOBILE_LOGIN_EXPIRES_IN,
     )
-    await db.record_mobile_login_token(
-        token=login_token,
-        user_id=user.userId,
-        expires_at=expires_at,
-    )
+    try:
+        await db.record_mobile_login_token(
+            token=login_token,
+            user_id=user.userId,
+            expires_at=expires_at,
+            expected_auth_version=user.authVersion,
+        )
+    except ValueError as error:
+        raise HTTPException(401, "reauth_required", headers={"X-AA-Auth-Error": "reauth_required"}) from error
     return MobileLoginQrCreateResponse(
         userId=user.userId,
         loginToken=login_token,
@@ -462,32 +474,33 @@ async def create_mobile_login_qr(
 @router.post("/auth/mobile-login/exchange", response_model=MobileLoginExchangeResponse)
 async def exchange_mobile_login(
     payload: MobileLoginExchangeRequest,
+    response: Response,
     db: Store = Depends(get_store),
 ) -> MobileLoginExchangeResponse:
     token_payload = verify_signed_token(MOBILE_LOGIN_TOKEN_KIND, payload.loginToken)
     if token_payload is None or token_payload.get("sub") != payload.userId:
         raise HTTPException(status_code=401, detail="invalid or expired mobile login token")
-    if not await db.consume_mobile_login_token(token=payload.loginToken, user_id=payload.userId):
-        raise HTTPException(status_code=401, detail="invalid or expired mobile login token")
+
     try:
         user = await db.get_user(payload.userId)
     except KeyError:
         raise HTTPException(status_code=401, detail="user no longer exists") from None
     if user.disabled:
         raise HTTPException(status_code=403, detail="account disabled")
-    refresh_token = create_signed_token(
-        MOBILE_REFRESH_TOKEN_KIND,
-        {
-            "sub": user.userId,
-            "aud": "agents-anywhere-mobile",
-            "nonce": secrets.token_urlsafe(16),
-        },
-        MOBILE_REFRESH_EXPIRES_IN,
-    )
+    if not await db.consume_mobile_login_token(token=payload.loginToken, user_id=payload.userId):
+        raise HTTPException(status_code=401, detail="invalid or expired mobile login token")
+    from agent_server.core.auth import DEFAULT_USER_EXPIRES_IN
+    try:
+        credentials, refresh_secret = await AuthSessions(db).create(user.userId, "agents-anywhere-mobile", transport="native" if payload.refreshProtocolVersion == 1 else "legacy", access_seconds=None if payload.refreshProtocolVersion == 1 else DEFAULT_USER_EXPIRES_IN, expected_auth_version=user.authVersion)
+    except SessionError:
+        raise HTTPException(401, "invalid or expired mobile login token") from None
+    credentials["refreshToken"] = refresh_secret
+    credentials["refreshExpiresAt"] = credentials["idleExpiresAt"]
+    response.headers["Cache-Control"] = "no-store"
     return MobileLoginExchangeResponse(
-        auth=_auth_response(user),
-        refreshToken=refresh_token,
-        expiresAt=_iso_from_epoch(int(time.time()) + MOBILE_REFRESH_EXPIRES_IN),
+        auth=AuthResponse(**credentials, role=user.role, email=user.email, emailVerified=user.emailVerified, displayName=user.displayName),
+        refreshToken=credentials["refreshToken"],
+        expiresAt=credentials["refreshExpiresAt"],
         serverTime=utc_now(),
     )
 
@@ -541,16 +554,6 @@ def _me_response(user: UserView) -> AuthMeResponse:
         userId=user.userId, email=user.email, emailVerified=user.emailVerified,
         displayName=user.displayName, role=user.role, disabled=user.disabled,
         avatar=user.avatar, serverTime=utc_now(),
-    )
-
-
-def _auth_response(user: UserView) -> AuthResponse:
-    return AuthResponse(
-        userId=user.userId,
-        role=user.role,
-        email=user.email, emailVerified=user.emailVerified, displayName=user.displayName,
-        accessToken=create_user_access_token(user.userId),
-        serverTime=utc_now(),
     )
 
 

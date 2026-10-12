@@ -6,7 +6,7 @@ import urllib.parse
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import RedirectResponse, Response
 
-from agent_server.core.auth import verify_signed_token, verify_user_access_token
+from agent_server.core.auth import verify_signed_token
 from agent_server.core.models import (
     FsDownloadResponse,
     UploadedAttachment,
@@ -16,10 +16,9 @@ from agent_server.core.utc import utc_now
 from agent_server.deps import current_user_id, get_attachment_service, get_store
 from agent_server.infra.repositories.facade import Store
 from agent_server.services.attachments import (
-    AttachmentService,
     LOCAL_FILE_TOKEN_KIND,
+    AttachmentService,
 )
-
 
 router = APIRouter(prefix="/sessions", tags=["session-files"])
 
@@ -55,9 +54,10 @@ async def attachment_open(
     token: str | None = Query(None),
     authorization: str | None = Header(None, alias="Authorization"),
     attachments: AttachmentService = Depends(get_attachment_service),
+    db: Store = Depends(get_store),
 ) -> RedirectResponse:
     try:
-        user_id = _user_id_from_header(authorization=authorization, token=token)
+        user_id = await _user_id_from_header(authorization=authorization, token=token, db=db)
         url = await attachments.user_file_open_url(
             session_id=session_id,
             file_id=file_id,
@@ -181,18 +181,16 @@ def _safe_header_value(value: str) -> str:
     return value.encode("latin-1", errors="replace").decode("latin-1")
 
 
-def _user_id_from_header(
+async def _user_id_from_header(
     *,
     authorization: str | None,
     token: str | None = None,
+    db: Store,
 ) -> str:
     prefix = "Bearer "
-    if authorization and authorization.startswith(prefix):
-        user_id = verify_user_access_token(authorization[len(prefix) :])
-        if user_id is not None:
-            return user_id
-    if token:
-        user_id = verify_user_access_token(token)
-        if user_id is not None:
-            return user_id
-    raise HTTPException(status_code=401, detail="invalid user access token")
+    from agent_server.services.auth_sessions import AuthSessions, SessionError
+    value = authorization[len(prefix):] if authorization and authorization.startswith(prefix) else token
+    try:
+        return (await AuthSessions(db).verify_access(value or ""))["sub"]
+    except SessionError:
+        raise HTTPException(status_code=401, detail="invalid user access token") from None

@@ -10,13 +10,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import urllib.parse
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 
-from agent_server.core.auth import verify_user_access_token
-from agent_server.infra.connector_rpc import ConnectorRpcManager
-from agent_server.deps import current_user_id, get_terminal_service
 from agent_server.core.models import (
     TerminalCreateRequest,
     TerminalListResponse,
@@ -24,10 +29,16 @@ from agent_server.core.models import (
     TerminalResizeRequest,
     TerminalResponse,
 )
-from agent_server.services.terminal import TerminalNotFoundError, TerminalService, TerminalServiceError
+from agent_server.deps import current_user_id, get_terminal_service
+from agent_server.infra.connector_rpc import ConnectorRpcManager
 from agent_server.infra.repositories.facade import Store
 from agent_server.infra.terminal_broker import TerminalBroker
-
+from agent_server.services.auth_sessions import AuthSessions, SessionError, digest
+from agent_server.services.terminal import (
+    TerminalNotFoundError,
+    TerminalService,
+    TerminalServiceError,
+)
 
 router = APIRouter(prefix="/sessions", tags=["sessions-terminal"])
 
@@ -130,12 +141,15 @@ async def terminal_stream(
     if not token:
         await websocket.close(code=4401)
         return
-    user_id = verify_user_access_token(urllib.parse.unquote(token))
-    if user_id is None:
+    db: Store = websocket.app.state.store
+    authentication = AuthSessions(db)
+    try:
+        claims = await authentication.verify_access(urllib.parse.unquote(token))
+    except SessionError:
         await websocket.close(code=4401)
         return
+    user_id = claims["sub"]
 
-    db: Store = websocket.app.state.store
     broker: TerminalBroker = websocket.app.state.terminal_broker
     manager: ConnectorRpcManager = websocket.app.state.rpc
     terminal_service = TerminalService(db, manager, broker)
@@ -155,7 +169,12 @@ async def terminal_stream(
     await broker.attach_client(terminal_id, websocket, from_seq=fromSeq)
     try:
         while True:
-            message = await websocket.receive_json()
+            try:
+                message = await asyncio.wait_for(websocket.receive_json(), timeout=1.0)
+            except TimeoutError:
+                await authentication.check_connection(user_id, claims.get("sid"), digest(urllib.parse.unquote(token)))
+                continue
+            await authentication.check_connection(user_id, claims.get("sid"), digest(urllib.parse.unquote(token)))
             mtype = message.get("type")
             if mtype == "input":
                 data_b64 = message.get("data")
@@ -198,6 +217,8 @@ async def terminal_stream(
             elif mtype == "ping":
                 await websocket.send_json({"type": "pong"})
             # Unknown types are ignored on purpose.
+    except SessionError:
+        await websocket.close(code=4401, reason="reauth_required")
     except WebSocketDisconnect:
         pass
     finally:

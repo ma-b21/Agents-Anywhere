@@ -19,6 +19,8 @@ class ClientWsTicket:
     scope: str
     expires_at_monotonic: float
     expires_at: str
+    login_session_id: str | None = None
+    legacy_hash: str | None = None
 
     @property
     def session_id(self) -> str:
@@ -44,6 +46,8 @@ class ClientWsTicketManager:
         client_id: str,
         session_id: str | None = None,
         scope: str | None = None,
+        login_session_id: str | None = None,
+        legacy_hash: str | None = None,
     ) -> tuple[str, str]:
         resolved_scope = scope if scope is not None else session_id
         if resolved_scope is None:
@@ -56,6 +60,8 @@ class ClientWsTicketManager:
             scope=resolved_scope,
             expires_at_monotonic=time.monotonic() + self._ttl_seconds,
             expires_at=expires_at_dt.isoformat().replace("+00:00", "Z"),
+            login_session_id=login_session_id,
+            legacy_hash=legacy_hash,
         )
         ticket_hash = _hash_ticket(token)
         if self._coordinator.distributed:
@@ -67,6 +73,8 @@ class ClientWsTicketManager:
                         "client_id": ticket.client_id,
                         "scope": ticket.scope,
                         "expires_at": ticket.expires_at,
+                        "login_session_id": ticket.login_session_id,
+                        "legacy_hash": ticket.legacy_hash,
                     },
                     separators=(",", ":"),
                 ),
@@ -97,6 +105,8 @@ class ClientWsTicketManager:
                     scope=payload.get("scope") or payload["session_id"],
                     expires_at_monotonic=time.monotonic(),
                     expires_at=payload["expires_at"],
+                    login_session_id=payload.get("login_session_id"),
+                    legacy_hash=payload.get("legacy_hash"),
                 )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 return None
