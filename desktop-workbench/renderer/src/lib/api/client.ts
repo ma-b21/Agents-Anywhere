@@ -3,7 +3,8 @@ import {
   apiErrorKind,
   extractErrorPayload
 } from "@/lib/api/errors";
-import { desktopApiProxyBase, getDesktopServerConnection } from "@/features/desktop/server-connection";
+import { desktopApiProxyBase, desktopDownloadUrl, getDesktopServerConnection } from "@/features/desktop/server-connection";
+import { shouldAuthorizeDownloadUrl } from "./download-auth";
 
 export type ApiTokenProvider = () => string | null | undefined;
 
@@ -104,12 +105,16 @@ export class ApiClient {
     headers.set("accept", headers.get("accept") ?? "application/json");
 
     const token = options.token ?? (options.auth === false ? null : this.getToken?.());
-    if (token) headers.set("authorization", `Bearer ${token}`);
+    const trusted = (url.startsWith("/") && !url.startsWith("//")) || shouldAuthorizeDownloadUrl(url, undefined, this.baseUrl || undefined);
+    if (token && trusted) headers.set("authorization", `Bearer ${token}`);
+    if (!trusted) headers.delete("authorization");
 
     let response: Response;
     try {
       response = await this.fetcher(url, {
         ...options,
+        redirect: "error",
+        credentials: "omit",
         body,
         headers
       });
@@ -146,7 +151,7 @@ export class ApiClient {
   ): string {
     const base = this.baseUrl ?? desktopApiProxyBase();
     const namespacedPath = apiPath(path);
-    const raw = namespacedPath.startsWith("http") ? namespacedPath : `${base}${namespacedPath}`;
+    const raw = namespacedPath.startsWith("http") ? desktopDownloadUrl(namespacedPath) : `${base}${namespacedPath}`;
     if (!query) return raw;
     const url = new URL(raw, typeof window === "undefined" ? "http://localhost" : window.location.origin);
     for (const [key, value] of Object.entries(query)) {

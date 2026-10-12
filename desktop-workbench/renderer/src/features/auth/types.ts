@@ -157,6 +157,9 @@ export type ServiceInfo = {
 };
 
 export type StoredSession = {
+  loginGeneration?: string;
+  sessionId?: string;
+  credentialVersion?: number;
   accessToken: string;
   userId: string;
   role: UserRole;

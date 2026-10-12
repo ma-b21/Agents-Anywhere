@@ -35,11 +35,12 @@ test("exchanges the authorization code on its own backend with the original PKCE
     const body = new URLSearchParams(String(init?.body));
     assert.equal(body.get("code"), "code-from-self-host");
     assert.equal(body.get("code_verifier"), "original-verifier");
+    assert.equal(body.get("refresh_protocol_version"), "1");
     assert.equal(body.get("client_id"), DESKTOP_OAUTH_CLIENT_ID);
     assert.equal(body.get("redirect_uri"), DESKTOP_OAUTH_REDIRECT_URI);
     return Response.json({ access_token: "desktop-token" });
   });
-  assert.equal(token, "desktop-token");
+  assert.equal(token.accessToken, "desktop-token");
   await assert.rejects(exchangeDesktopOAuthCode("code", "verifier", server, async () => Response.json({})), /invalid/);
   await assert.rejects(exchangeDesktopOAuthCode("code", "verifier", server, async () => Response.json({ detail: "expired code" }, { status: 400 })), /expired code/);
 });

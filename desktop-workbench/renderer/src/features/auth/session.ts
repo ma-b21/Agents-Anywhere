@@ -13,6 +13,9 @@ export function loadStoredSession(): StoredSession | null {
       accessToken: parsed.accessToken,
       userId: parsed.userId,
       role: parsed.role,
+      loginGeneration: parsed.loginGeneration,
+      sessionId: parsed.sessionId,
+      credentialVersion: parsed.credentialVersion,
       serverUrl: typeof parsed.serverUrl === "string" ? parsed.serverUrl : undefined,
     };
   } catch {

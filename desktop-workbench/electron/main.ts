@@ -10,6 +10,7 @@ import {
   nativeTheme,
   protocol,
   session,
+  safeStorage,
   shell,
   Tray,
   type IpcMainInvokeEvent,
@@ -40,6 +41,8 @@ import { DesktopBackendClient } from "./backend-client";
 import { windowMaterialOptions } from "./window-material";
 import config from "../config.json";
 import { proxyDesktopApi } from "./api-proxy";
+import { DesktopAuthCoordinator } from "./desktop-auth";
+import { DesktopAuthFileStore } from "./desktop-auth-store";
 import {
   checkDesktopServer,
   DesktopServerError,
@@ -94,6 +97,7 @@ let shutdownPromise: Promise<void> | null = null;
 let quitConfirmationPromise: Promise<boolean> | null = null;
 const activeNotifications = new Set<Notification>();
 let serverStore: DesktopServerStore | null = null;
+let desktopAuth: DesktopAuthCoordinator | null = null;
 let startingDesktopOAuth = false;
 let desktopOAuthAttempt = 0;
 let pendingDesktopOAuth: (DesktopOAuthPending & { server: DesktopServerConnection; attempt: number }) | null = null;
@@ -243,13 +247,22 @@ async function handleDesktopOAuthCallback(rawUrl: string): Promise<void> {
   try {
     const code = desktopOAuthCodeFromCallback(rawUrl, pending);
     pendingDesktopOAuth = null;
-    const accessToken = await exchangeDesktopOAuthCode(code, pending.verifier, pending.server, (url, init) => net.fetch(String(url), init));
+    const tokens = await exchangeDesktopOAuthCode(code, pending.verifier, pending.server, (url, init) => net.fetch(String(url), init));
+    const response = await net.fetch(pending.server.serverUrl + pending.server.apiNamespace + "/auth/me", {
+      headers: { authorization: "Bearer " + tokens.accessToken }, redirect: "error", credentials: "omit",
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw new Error("Could not verify desktop sign-in.");
+    const me = await response.json() as { userId?: unknown; role?: unknown };
+    if (typeof me.userId !== "string" || !me.userId || (me.role !== "admin" && me.role !== "member")) throw new Error("Invalid sign-in identity.");
     if (pending.attempt !== desktopOAuthAttempt) return;
-    if (!serverStore) throw new Error("Desktop server settings are not ready.");
+    if (!serverStore || !desktopAuth) throw new Error("Desktop server settings are not ready.");
+    const authSession = desktopAuth.login(pending.server, tokens, { userId: me.userId, role: me.role });
     serverStore.save(pending.server);
     // The renderer starts provisioning as soon as it sees this result.
     await syncBackendServerConnection();
-    publishDesktopOAuthResult({ status: "success", accessToken, server: pending.server });
+    if (pending.attempt !== desktopOAuthAttempt || desktopAuth.getSession()?.loginGeneration !== authSession.loginGeneration) return;
+    publishDesktopOAuthResult({ status: "success", accessToken: authSession.accessToken, server: pending.server, session: authSession });
   } catch (error) {
     if (pending.attempt !== desktopOAuthAttempt) return;
     publishDesktopOAuthResult({ status: "error", error: errorMessage(error) });
@@ -286,6 +299,7 @@ function registerStaticWebProtocol(): void {
         apiOrigin(),
         [`${WEB_PROTOCOL}://${WEB_HOST}`, ...(devOrigin ? [devOrigin] : [])],
         (input, init) => net.fetch(String(input), init),
+        desktopAuth ?? undefined,
       );
     }
 
@@ -670,6 +684,7 @@ function registerIpcHandlers(): void {
     if (startingDesktopOAuth) throw new Error("A sign-in request is already starting.");
     startingDesktopOAuth = true;
     desktopOAuthAttempt += 1;
+    const attempt = desktopOAuthAttempt;
     pendingDesktopOAuth = null;
     try {
       const server = resolveDesktopServer(input?.serverUrl ?? config.cloud.serverUrl, {
@@ -677,9 +692,10 @@ function registerIpcHandlers(): void {
         development: !app.isPackaged,
       });
       await checkDesktopServer(server, (url, init) => net.fetch(String(url), init));
+      if (attempt !== desktopOAuthAttempt) throw new Error("Sign-in was cancelled.");
       const request = createDesktopOAuthRequest(server.oauthWebOrigin);
       desktopOAuthResult = null;
-      pendingDesktopOAuth = { ...request.pending, server, attempt: desktopOAuthAttempt };
+      pendingDesktopOAuth = { ...request.pending, server, attempt };
       if (!app.isPackaged) {
         const { openDevelopmentLoginWindow } = await import("./development-login.js");
         await openDevelopmentLoginWindow({
@@ -707,6 +723,29 @@ function registerIpcHandlers(): void {
     const result = desktopOAuthResult;
     desktopOAuthResult = null;
     return result;
+  });
+  ipcMain.handle("workbench:auth:getSession", (event) => {
+    assertTrustedRenderer(event);
+    return desktopAuth?.getSession() ?? null;
+  });
+  ipcMain.handle("workbench:auth:importLegacy", (event, value) => {
+    assertTrustedRenderer(event);
+    if (!desktopAuth) throw new Error("Desktop auth is not ready.");
+    return desktopAuth.importLegacy(activeDesktopServer(), value);
+  });
+  ipcMain.handle("workbench:auth:accessToken", (event, input: { serverUrl: string; accessToken: string; rejected?: boolean }) => {
+    assertTrustedRenderer(event);
+    if (!desktopAuth || input?.serverUrl !== apiOrigin() || typeof input.accessToken !== "string") throw new Error("The login or server changed.");
+    return desktopAuth.accessToken(input.serverUrl, input.accessToken, input.rejected === true);
+  });
+  ipcMain.handle("workbench:auth:signOut", (event, expectedLogin: string | null) => {
+    assertTrustedRenderer(event);
+    const current = desktopAuth?.getSession();
+    if (current && current.loginGeneration !== expectedLogin) return false;
+    desktopOAuthAttempt += 1;
+    pendingDesktopOAuth = null;
+    desktopOAuthResult = null;
+    return current ? desktopAuth!.signOut(current.loginGeneration) : true;
   });
   ipcMain.handle(
     "workbench:notifications:show",
@@ -786,6 +825,10 @@ function registerIpcHandlers(): void {
     await client.shutdown();
     await session.defaultSession.clearStorageData();
     await session.defaultSession.clearCache();
+    desktopOAuthAttempt += 1;
+    pendingDesktopOAuth = null;
+    const login = desktopAuth?.getSession();
+    if (login) desktopAuth?.signOut(login.loginGeneration);
     // Async removal keeps the UI process free; the app is about to relaunch.
     await fs.promises.rm(connectorDataPath(), { recursive: true, force: true });
     await fs.promises.rm(connectorLogsPath(), { recursive: true, force: true });
@@ -838,6 +881,23 @@ function backendInit(): BackendInit {
  */
 async function initializeDesktopServices(): Promise<void> {
   serverStore = new DesktopServerStore(path.join(app.getPath("userData"), "desktop-server.json"), activeDesktopServer());
+  const requireCipher = () => {
+    if (!safeStorage.isEncryptionAvailable() || (process.platform === "linux" && safeStorage.getSelectedStorageBackend() === "basic_text")) {
+      throw new Error("Operating-system credential encryption is unavailable.");
+    }
+  };
+  desktopAuth = new DesktopAuthCoordinator(new DesktopAuthFileStore(path.join(app.getPath("userData"), "desktop-auth.bin"), {
+    encrypt: (plain) => { requireCipher(); return safeStorage.encryptString(plain); },
+    decrypt: (bytes) => { requireCipher(); return safeStorage.decryptString(bytes); },
+  }), (input, init) => net.fetch(String(input), init), (value) => sendToRenderer("workbench:auth:sessionChanged", value));
+  const renewalTimer = setInterval(() => {
+    if (isQuitting || !mainWindow?.isVisible()) return;
+    try {
+      const value = desktopAuth?.getSession();
+      if (value && value.serverUrl === apiOrigin()) void desktopAuth?.accessToken(value.serverUrl, value.accessToken).catch(() => undefined);
+    } catch { /* Unavailable encryption/storage is recoverable; never clear the login. */ }
+  }, 30_000);
+  renewalTimer.unref();
   let settleOwnership: (state: OwnershipState) => void = () => undefined;
   ownershipReady = new Promise<OwnershipState>((resolve) => {
     const timer = setTimeout(() => resolve(ownership), OWNERSHIP_FIRST_RESULT_TIMEOUT_MS);
@@ -849,7 +909,18 @@ async function initializeDesktopServices(): Promise<void> {
     };
   });
   const client = new DesktopBackendClient({
-    fetcher: (input, init) => net.fetch(String(input), init),
+    fetcher: (input, init) => {
+      const url = new URL(String(input));
+      const bearer = new Headers(init?.headers).get("authorization");
+      const token = bearer?.startsWith("Bearer ") ? bearer.slice(7) : null;
+      const action = (current?: string) => {
+        const headers = new Headers(init?.headers);
+        if (current) headers.set("authorization", "Bearer " + current);
+        return net.fetch(String(input), { ...init, headers, redirect: "error", credentials: "omit" });
+      };
+      return desktopAuth && token && url.origin === apiOrigin() && desktopAuth.handles(url.origin, token)
+        ? desktopAuth.execute(url.origin, token, action) : action();
+    },
     onEvent: (event) => {
       if (event.event === "ownership") {
         ownership = event.data as OwnershipState;

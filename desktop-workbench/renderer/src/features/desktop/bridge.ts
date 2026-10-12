@@ -1,6 +1,7 @@
 /** `preparing` means the first Connector environment install is still running. */
 export type LocalOwnershipState = { status: "owned" | "conflict" | "preparing" | "error"; message?: string }
 import type { DesktopUpdateState } from "../../../../shared/desktop-updates"
+import type { DesktopAuthSession } from "../../../../shared/desktop-auth"
 export type { DesktopUpdateState } from "../../../../shared/desktop-updates"
 
 export type DesktopConnectorStatus =
@@ -143,13 +144,18 @@ export type DesktopWorkbenchBridge = {
     onState: (listener: (state: DesktopUpdateState) => void) => () => void
   }
   auth?: {
+    getSession: () => Promise<DesktopAuthSession | null>
+    importLegacy: (value: { serverUrl?: string; accessToken: string; userId: string; role: "admin" | "member" }) => Promise<DesktopAuthSession | null>
+    accessToken: (input: { serverUrl: string; accessToken: string; rejected?: boolean }) => Promise<string>
+    signOut: (expectedLogin: string | null) => Promise<boolean>
+    onSessionChanged: (listener: (value: DesktopAuthSession | null) => void) => () => void
     getServer: () => Promise<DesktopServerConnection>
     startOAuth: (input?: { serverUrl?: string }) => Promise<
       | { status: "opened"; authorizeUrl: string }
       | { status: "error"; code: "invalidServer" | "serverUnavailable" | "invalidHealth" | "serverTimeout" | "oauth"; error: string }
     >
     consumeOAuthResult: () => Promise<
-      | { status: "success"; accessToken: string; server: DesktopServerConnection }
+      | { status: "success"; accessToken: string; server: DesktopServerConnection; session: DesktopAuthSession }
       | { status: "error"; error: string }
       | null
     >

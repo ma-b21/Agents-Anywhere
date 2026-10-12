@@ -1,5 +1,4 @@
 "use client"
-
 import * as React from "react"
 import { authApi } from "@/features/auth/api"
 import {
@@ -10,7 +9,7 @@ import {
 import type { AuthMe, StoredSession } from "@/features/auth/types"
 import { normalizeAuthMe, normalizeDesktopOAuthMe } from "@/features/auth/normalize-me"
 import { getDesktopWorkbenchBridge } from "@/features/desktop/bridge"
-import { getDesktopServerConnection, setDesktopServerConnection } from "@/features/desktop/server-connection"
+import { setDesktopServerConnection } from "@/features/desktop/server-connection"
 import { useTranslations } from "next-intl"
 
 export type AuthScreen = "login" | "signed-out" | "preview" | "onboarding" | "app"
@@ -78,6 +77,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const t = useTranslations("auth")
   const [screen, setScreenState] = React.useState<AuthScreen>("login")
   const [session, setSession] = React.useState<StoredSession | null>(null)
+  const latestSession = React.useRef<StoredSession | null>(null)
   const [me, setMe] = React.useState<AuthMe | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
@@ -93,54 +93,70 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   React.useEffect(() => {
     let cancelled = false
-    const stored = loadStoredSession()
+    const bridge = getDesktopWorkbenchBridge()?.auth
     const nextScreen = hashToScreen(window.location.hash)
-
-    async function boot() {
-      try {
-        const bridge = getDesktopWorkbenchBridge()?.auth
-        if (bridge) setDesktopServerConnection(await bridge.getServer())
-      } catch {
-        if (!cancelled) {
-          setError(t("errors.config", { detail: "" }))
-          setLoading(false)
-        }
-        return
-      }
+    let revision = 0
+    const apply = (value: StoredSession | null) => {
       if (cancelled) return
-      if (!stored) {
-        if (!cancelled) {
-          setScreenState(nextScreen === "app" ? "login" : nextScreen)
-          setLoading(false)
-        }
+      if (!value) {
+        latestSession.current = null
+        clearStoredSession(); setSession(null); setMe(null); setScreenState("login")
         return
       }
-
-      setSession(stored)
+      try { saveStoredSession(value) } catch { /* Main's encrypted file is authoritative. */ }
+      latestSession.current = value
+      // Same-login renewal must not tear down every realtime effect.
+      setSession((previous) => previous && previous.loginGeneration === value.loginGeneration ? previous : value)
+      setMe((previous) => previous?.userId === value.userId ? previous : normalizeAuthMe(null, value))
+    }
+    const unsubscribe = bridge?.onSessionChanged((value) => {
+      revision++
+      if (value) void bridge.getServer().then(setDesktopServerConnection).catch(() => undefined)
+      apply(value)
+    })
+    async function boot() {
+      let stored: StoredSession | null = null
+      const bootRevision = revision
       try {
-        if (stored.serverUrl && stored.serverUrl !== getDesktopServerConnection()?.serverUrl) {
-          throw new Error("The saved session belongs to a different server.")
+        if (bridge) {
+          setDesktopServerConnection(await bridge.getServer())
+          stored = await bridge.getSession()
+          if (!stored) {
+            const legacy = loadStoredSession()
+            // A native mirror after logout must never resurrect an old session.
+            if (legacy && !legacy.loginGeneration) stored = await bridge.importLegacy(legacy)
+          }
+        } else stored = loadStoredSession()
+        if (cancelled) return
+        if (bridge && revision !== bootRevision) {
+          const current = await bridge.getSession()
+          if (!current || current.loginGeneration !== stored?.loginGeneration) return
+          stored = current
         }
+        if (!stored) {
+          clearStoredSession()
+          setScreenState(nextScreen === "app" ? "login" : nextScreen)
+          return
+        }
+        apply(stored)
+        setMe(normalizeAuthMe(null, stored))
+        setScreenState(nextScreen === "login" ? "app" : nextScreen)
         const currentUser = normalizeAuthMe(await authApi.me(stored.accessToken), stored)
         if (cancelled) return
+        const current = await bridge?.getSession()
+        if (bridge && current?.loginGeneration !== stored.loginGeneration) return
         setMe(currentUser)
-        setScreenState(nextScreen === "login" ? "app" : nextScreen)
-      } catch {
-        clearStoredSession()
-        if (cancelled) return
-        setSession(null)
-        setMe(null)
-        setScreenState("login")
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
+      } catch (err) {
+        // Only Main's explicit sessionChanged(null) clears credentials. Offline,
+        // IPC, encryption and disk errors leave the durable login recoverable.
+        if (!cancelled) setError(err instanceof Error ? err.message : t("errors.config", { detail: "" }))
+      } finally { if (!cancelled) setLoading(false) }
     }
-
     void boot()
     const handleHashChange = () => setScreenState(hashToScreen(window.location.hash))
     window.addEventListener("hashchange", handleHashChange)
     return () => {
-      cancelled = true
+      cancelled = true; unsubscribe?.()
       window.removeEventListener("hashchange", handleHashChange)
     }
   }, [])
@@ -150,15 +166,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setScreenState(nextScreen)
   }, [])
 
-  const finishDesktopOAuth = React.useCallback(async (accessToken: string) => {
-    const currentUser = normalizeDesktopOAuthMe(await authApi.me(accessToken))
-    const nextSession: StoredSession = {
-      accessToken,
-      userId: currentUser.userId,
-      role: currentUser.role,
-      serverUrl: getDesktopServerConnection()?.serverUrl,
-    }
+  const finishDesktopOAuth = React.useCallback(async (nextSession: StoredSession) => {
+    const bridge = getDesktopWorkbenchBridge()?.auth
+    if ((await bridge?.getSession())?.loginGeneration !== nextSession.loginGeneration) return
+    const currentUser = normalizeDesktopOAuthMe(await authApi.me(nextSession.accessToken))
+    if ((await bridge?.getSession())?.loginGeneration !== nextSession.loginGeneration) return
     saveStoredSession(nextSession)
+    latestSession.current = nextSession
     setSession(nextSession)
     setMe(currentUser)
     setError(null)
@@ -195,7 +209,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setDesktopServerConnection(result.server)
         setOAuthStatus("opening")
         setError(null)
-        await finishDesktopOAuth(result.accessToken)
+        await finishDesktopOAuth(result.session)
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : t("errors.oauth"))
@@ -255,17 +269,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return null
     }
     const currentUser = normalizeAuthMe(await authApi.me(session.accessToken), session)
+    if (desktopAuthBridge && (await desktopAuthBridge.getSession())?.loginGeneration !== session.loginGeneration) return null
     setMe(currentUser)
     return currentUser
   }, [session])
 
   const signOut = React.useCallback(() => {
+    void (async () => {
+      if (desktopAuthBridge && !await desktopAuthBridge.signOut(session?.loginGeneration ?? null)) return
+      if (latestSession.current && latestSession.current.loginGeneration !== session?.loginGeneration) return
+      latestSession.current = null
     clearStoredSession()
     setSession(null)
     setMe(null)
     window.location.hash = "#/signed-out"
     setScreenState("signed-out")
-  }, [])
+    })().catch((err) => setError(err instanceof Error ? err.message : String(err)))
+  }, [desktopAuthBridge, session?.loginGeneration])
 
   return (
     <AuthContext.Provider

@@ -21,6 +21,7 @@ import type {
   PublicLocalDesktopBinding,
 } from "./connector-types";
 import type { DesktopOAuthResult } from "./desktop-oauth";
+import type { DesktopAuthSession } from "../shared/desktop-auth";
 import type { DesktopOnboardingEntry } from "./desktop-onboarding";
 import type { DesktopOAuthStartResult, DesktopServerConnection } from "./desktop-server";
 
@@ -58,6 +59,16 @@ function apiTarget(): Promise<ApiTarget> {
 }
 
 async function api<T>(route: string, init: RequestInit = {}): Promise<T> {
+  if (typeof init.body === "string") {
+    const body = JSON.parse(init.body) as Record<string, unknown>;
+    if (typeof body.userToken === "string" && body.userToken) {
+      const server = await ipcRenderer.invoke("workbench:auth:getServer") as DesktopServerConnection;
+      body.userToken = await ipcRenderer.invoke("workbench:auth:accessToken", {
+        serverUrl: body.serverUrl ?? server.serverUrl, accessToken: body.userToken,
+      });
+      init = { ...init, body: JSON.stringify(body) };
+    }
+  }
   const target = await apiTarget();
   const headers = new Headers(init.headers);
   if (init.body !== undefined && !headers.has("content-type")) headers.set("content-type", "application/json");
@@ -173,6 +184,14 @@ contextBridge.exposeInMainWorld("desktopWorkbench", {
     onState: (callback: (state: DesktopUpdateState) => void): (() => void) => subscribe("workbench:updates:state", callback),
   },
   auth: {
+    getSession: (): Promise<DesktopAuthSession | null> => ipcRenderer.invoke("workbench:auth:getSession"),
+    importLegacy: (value: { serverUrl?: string; accessToken: string; userId: string; role: "admin" | "member" }): Promise<DesktopAuthSession | null> =>
+      ipcRenderer.invoke("workbench:auth:importLegacy", value),
+    accessToken: (input: { serverUrl: string; accessToken: string; rejected?: boolean }): Promise<string> =>
+      ipcRenderer.invoke("workbench:auth:accessToken", input),
+    signOut: (expectedLogin: string | null): Promise<boolean> => ipcRenderer.invoke("workbench:auth:signOut", expectedLogin),
+    onSessionChanged: (callback: (value: DesktopAuthSession | null) => void): (() => void) =>
+      subscribe("workbench:auth:sessionChanged", callback),
     getServer: (): Promise<DesktopServerConnection> => ipcRenderer.invoke("workbench:auth:getServer"),
     startOAuth: (input?: { serverUrl?: string }): Promise<DesktopOAuthStartResult> =>
       ipcRenderer.invoke("workbench:auth:startOAuth", input),

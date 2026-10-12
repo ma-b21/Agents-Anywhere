@@ -9,8 +9,8 @@
 | 阶段 | 实施 | 测试 | 独立审阅 | commit |
 | --- | --- | --- | --- | --- |
 | server | 代码完成 | 可运行全套898通过；增补后专项218通过 | 最终复审通过；审阅者独立4项通过 | 5b20a74c |
-| Android | 完成 | Kotlin2.2 controller编译、36项JVM/HTTP/边界通过；APK/真机未验 | 最终复审通过；审阅者独立36项通过 | 本阶段commit |
-| Windows | 未开始 | 未执行 | 未执行 | 待提交 |
+| Android | 完成 | Kotlin2.2 controller编译、36项JVM/HTTP/边界通过；APK/真机未验 | 最终复审通过；审阅者独立36项通过 | d5236468 |
+| Windows | 完成 | main可运行130项、Renderer321项通过；2项原有基线失败单列；类型检查/生产构建/系统加密通过 | 最终复审通过；审阅者独立31项通过 | 本阶段commit，下阶段回填hash |
 | Web | 未开始 | 未执行 | 未执行 | 待提交 |
 
 ### server可执行清单
@@ -33,9 +33,11 @@ Android阶段记录：项目同版Kotlin2.2编译API/模型/会话与realtime co
 
 ### Windows可执行清单
 
-- [ ] 主进程safeStorage会话/单飞、OAuth完整返回、窄IPC、多窗口共用。
-- [ ] Renderer请求/登录状态、代理/上传下载/realtime最新token接入。
-- [ ] 主进程/Renderer测试、typecheck/build、可用安装包验收；审阅复测后提交Windows commit。
+- [x] 主进程safeStorage会话/单飞、OAuth完整返回、窄IPC、多窗口共用。
+- [x] Renderer请求/登录状态、代理/上传下载/realtime最新token接入（待独立审阅与复测）。
+- [x] 主进程/Renderer测试、typecheck/build、系统加密与安装包未验记录；独立审阅复测后提交Windows commit。
+
+Windows阶段记录：新增15项主进程协调器/存储/代理测试、3项终端重连测试、5项真实AuthProvider组件测试通过，覆盖20请求单飞、持久attempt及丢响应重启恢复、两处写盘失败、晚到401、网络不重放、退出/切号/错host保护、70代旧闭包、legacy升级、multipart重试、取消等待者、离线启动、同generation不拆实时连接及迟到退出成功不清新账号。main可运行130项通过；既有backend-client.test在未改源码/测试/protocol下单跑仍有ERR_IPC_CHANNEL_CLOSED，独立审阅者也复现，未算通过。Renderer322项中321通过，既有task-composer-preferences在未改new-session-content/测试中以LF结束标记匹配CRLF失败，未改测试冒充通过。Main/Renderer类型检查和静态生产构建通过；隔离userData下实际Windows safeStorage加密/解密通过，无真实凭据读取。首次审阅发现退出回调迟到清新账号UI，已加同步latestSession fencing和组件回归，最终复审通过；审阅者独立重跑31项专项全通过。未构建/安装新的NSIS exe、未接真实服务做跨TTL续登或多窗口实机验收，仍作为发布门禁。
 
 ### Web可执行清单
 
@@ -351,4 +353,4 @@ E2E：各端登录 → 持续超过短access TTL的任务 → 不切会话观察
 
 建议先P0/P1/P2和服务端故障注入，再Android；不要三端先发刷新，最后补服务端和会话策略。
 
-Android补充复审：已补第二次业务401迟到时按被拒绝token与credentialVersion条件撤销，检查和标记位于同一synchronized临界区。新增并发a2回归，22项状态机通过，独立Kotlin2.2编译/22项复测通过；原9项HTTP与5项存储边界保留，合计36项。真实APK/Keystore/设备门禁不变。
+跨端补充复审：Android与Windows已补第二次业务401迟到时按被拒绝token与credentialVersion条件撤销，避免清掉已并发换发的新凭据。Android22项状态机、Windows16项主进程专项独立复测通过；旧第二401真正失效测试仍通过。各端原有发布前门禁不变。

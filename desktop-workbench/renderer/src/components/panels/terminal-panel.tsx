@@ -13,6 +13,9 @@ import { Separator } from "@/components/ui/separator"
 import { dashboardApi } from "@/features/dashboard/api"
 import type { TerminalView } from "@/features/dashboard/types"
 import { apiWebSocketUrl } from "@/lib/api"
+import { connectAuthenticatedSocket } from "@/lib/authenticated-socket"
+import { getDesktopWorkbenchBridge } from "@/features/desktop/bridge"
+import { getDesktopServerConnection } from "@/features/desktop/server-connection"
 import { cn } from "@/lib/utils"
 import { ChevronExternal } from "./runtime-icons"
 
@@ -468,7 +471,7 @@ function XtermHost({
 
     let term: import("@xterm/xterm").Terminal | null = null
     let fit: import("@xterm/addon-fit").FitAddon | null = null
-    let socket: WebSocket | null = null
+    let socket: ReturnType<typeof connectAuthenticatedSocket> | null = null
     let resizeObserver: ResizeObserver | null = null
     let lastSeenSeq = 0
     let lastSentSize: { cols: number; rows: number } | null = null
@@ -481,9 +484,7 @@ function XtermHost({
       const rows = term.rows
       if (lastSentSize?.cols === cols && lastSentSize.rows === rows) return
       lastSentSize = { cols, rows }
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "resize", cols, rows }))
-      }
+      socket?.send(JSON.stringify({ type: "resize", cols, rows }))
     }
 
     const printExit = (exitCode: number | null | undefined) => {
@@ -525,8 +526,7 @@ function XtermHost({
       term.focus()
 
       term.onData((data) => {
-        if (socket?.readyState !== WebSocket.OPEN) return
-        socket.send(JSON.stringify({ type: "input", data: utf8ToBase64(data) }))
+        socket?.send(JSON.stringify({ type: "input", data: utf8ToBase64(data) }))
       })
 
       resizeObserver = new ResizeObserver(() => {
@@ -545,13 +545,24 @@ function XtermHost({
       })
       resizeObserver.observe(host)
 
-      socket = new WebSocket(connectorTerminalStreamUrl(connectorId, terminal.terminalId, token))
-      socket.onopen = () => {
+      const serverUrl = getDesktopServerConnection()?.serverUrl
+      socket = connectAuthenticatedSocket({
+        getToken: async (rejected) => {
+          const bridge = getDesktopWorkbenchBridge()?.auth
+          if (!bridge || !serverUrl) return token
+          return bridge.accessToken({ serverUrl, accessToken: token, rejected })
+        },
+        url: (current) => connectorTerminalStreamUrl(connectorId, terminal.terminalId, current),
+        shouldReconnect: () => !exitPrinted,
+        reconnecting: () => { if (!cancelled) setStatus("connecting") },
+        failed: (err) => { if (!cancelled) onError(err instanceof Error ? err.message : String(err)) },
+        opened: () => {
         if (cancelled) return
         setStatus("open")
+        lastSentSize = null
         sendResize()
-      }
-      socket.onmessage = (event) => {
+      },
+      message: (event) => {
         if (cancelled || !term) return
         let message: unknown
         try {
@@ -573,13 +584,8 @@ function XtermHost({
         } else if (message.type === "error") {
           onError(message.message)
         }
-      }
-      socket.onerror = () => {
-        if (!cancelled) onError(t("websocketError"))
-      }
-      socket.onclose = () => {
-        if (!cancelled && !exitPrinted) setStatus("connecting")
-      }
+      },
+      })
     })().catch((err) => {
       if (!cancelled) onError(err instanceof Error ? err.message : String(err))
     })

@@ -1,5 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import config from "../config.json";
+import { parseDesktopCredentials, type DesktopCredentials } from "./desktop-auth";
+import type { DesktopAuthSession } from "../shared/desktop-auth";
 import type { DesktopServerConnection } from "./desktop-server";
 
 export const DESKTOP_OAUTH_PROTOCOL = config.oauth.protocol;
@@ -16,7 +18,7 @@ export type DesktopOAuthPending = {
 };
 
 export type DesktopOAuthResult =
-  | { status: "success"; accessToken: string; server: DesktopServerConnection }
+  | { status: "success"; accessToken: string; session: DesktopAuthSession; server: DesktopServerConnection }
   | { status: "error"; error: string };
 
 export async function exchangeDesktopOAuthCode(
@@ -24,7 +26,7 @@ export async function exchangeDesktopOAuthCode(
   verifier: string,
   server: DesktopServerConnection,
   fetcher: typeof fetch,
-): Promise<string> {
+): Promise<DesktopCredentials> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.oauth.tokenTimeoutMs);
   try {
@@ -39,6 +41,7 @@ export async function exchangeDesktopOAuthCode(
         client_id: DESKTOP_OAUTH_CLIENT_ID,
         redirect_uri: DESKTOP_OAUTH_REDIRECT_URI,
         code_verifier: verifier,
+        refresh_protocol_version: "1",
       }).toString(),
       signal: controller.signal,
     });
@@ -49,7 +52,7 @@ export async function exchangeDesktopOAuthCode(
     if (typeof payload.access_token !== "string" || !payload.access_token) {
       throw new Error("Desktop login token response was invalid.");
     }
-    return payload.access_token;
+    return parseDesktopCredentials(payload, true);
   } finally {
     clearTimeout(timeout);
   }
