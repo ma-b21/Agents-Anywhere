@@ -12,6 +12,9 @@ export type AuthConfig = {
 };
 
 export type AuthResponse = {
+  sessionId?: string;
+  credentialVersion?: number;
+  accessExpiresIn?: number;
   userId: string;
   email: string | null;
   displayName: string;
@@ -157,6 +160,9 @@ export type ServiceInfo = {
 };
 
 export type StoredSession = {
+  loginGeneration?: string;
+  sessionId?: string;
+  credentialVersion?: number;
   accessToken: string;
   userId: string;
   role: UserRole;

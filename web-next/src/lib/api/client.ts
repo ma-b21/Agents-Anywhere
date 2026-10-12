@@ -3,6 +3,8 @@ import {
   apiErrorKind,
   extractErrorPayload
 } from "@/lib/api/errors";
+import { browserAuthTarget, webAuth } from "@/features/auth/web-auth-runtime";
+import { WebAuthHttpError, WebLoginChanged } from "@/features/auth/web-auth-coordinator";
 
 export type ApiTokenProvider = () => string | null | undefined;
 
@@ -16,6 +18,7 @@ export type ApiRequestOptions = Omit<RequestInit, "body"> & {
   body?: BodyInit | Record<string, unknown> | unknown[] | null;
   token?: string | null;
   auth?: boolean;
+  browserIdentity?: boolean;
   query?: Record<string, string | number | boolean | null | undefined>;
 };
 
@@ -39,15 +42,20 @@ export class ApiClient {
   private readonly baseUrl: string;
   private readonly getToken?: ApiTokenProvider;
   private readonly fetcher: typeof fetch;
+  private readonly customFetcher: boolean;
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? "";
     this.getToken = options.getToken;
+    this.customFetcher = Boolean(options.fetcher);
     this.fetcher = options.fetcher ?? ((input, init) => fetch(input, init));
   }
 
   get<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
     return this.request<T>(path, { ...options, method: options.method ?? "GET" });
+  }
+  signIn<T>(path: string, body: ApiRequestOptions["body"]): Promise<T> {
+    return this.request<T>(path, { method: "POST", body, auth: false, browserIdentity: true });
   }
 
   post<T>(
@@ -79,7 +87,9 @@ export class ApiClient {
   }
 
   async request<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
-    const url = this.buildUrl(path, options.query);
+    const rawUrl = this.buildUrl(path, options.query);
+    const target = browserAuthTarget(rawUrl);
+    const url = this.customFetcher ? rawUrl : target.url;
     const headers = new Headers(options.headers);
     const body = normalizeBody(options.body);
     if (body != null && !headers.has("content-type") && isJsonBody(options.body)) {
@@ -88,19 +98,27 @@ export class ApiClient {
     headers.set("accept", headers.get("accept") ?? "application/json");
 
     const token = options.token ?? (options.auth === false ? null : this.getToken?.());
-    if (token) headers.set("authorization", `Bearer ${token}`);
+    const trusted = target.trusted || (this.customFetcher && (!/^https?:/.test(rawUrl) || Boolean(this.baseUrl && rawUrl.startsWith(this.baseUrl + "/"))));
+    if (token && trusted) headers.set("authorization", `Bearer ${token}`);
+    if (!trusted) headers.delete("authorization");
 
     let response: Response;
     try {
-      response = await this.fetcher(url, {
-        ...options,
-        body,
-        headers
-      });
+      const coordinator = !this.customFetcher && target.trusted ? webAuth() : null;
+      const action = (current?: string) => {
+        options.signal?.throwIfAborted();
+        const outgoing = new Headers(headers);
+        if (current && trusted) outgoing.set("authorization", "Bearer " + current);
+        return this.fetcher(url, { ...options, body, headers: outgoing, redirect: "error", credentials: trusted ? "include" : "omit" });
+      };
+      response = options.browserIdentity && coordinator ? await coordinator.login(path, options.body)
+        : coordinator && token ? await coordinator.execute(token, action) : await action(token ?? undefined);
     } catch (error) {
+      const status = error instanceof WebAuthHttpError ? error.status : error instanceof WebLoginChanged ? 409 : 0;
       throw new ApiError({
-        status: 0,
-        kind: "network",
+        status,
+        kind: apiErrorKind(status),
+        code: error instanceof WebAuthHttpError ? error.code : undefined,
         detail: error instanceof Error ? error.message : "network error",
         url
       });

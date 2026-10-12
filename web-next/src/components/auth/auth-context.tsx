@@ -11,6 +11,8 @@ import {
 import type { AuthMe, OAuthFinalizePayload, StoredSession } from "@/features/auth/types"
 import { useTranslations } from "next-intl"
 import { authFlowHash, clearAuthFlow, rememberAuthFlow, takeAuthFlow } from "@/features/auth/continuation"
+import { subscribeWebAuth, webAuth } from "@/features/auth/web-auth-runtime"
+import { WebAuthHttpError, WebLoginChanged } from "@/features/auth/web-auth-coordinator"
 
 export type AuthScreen =
   | "bootstrap"
@@ -159,6 +161,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Start with "login" for safe SSR, then immediately correct from hash on mount.
   const [screen, setScreenState] = React.useState<AuthScreen>("login")
   const [session, setSession] = React.useState<StoredSession | null>(null)
+  const latestSession = React.useRef<StoredSession | null>(null)
   const [me, setMe] = React.useState<AuthMe | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
@@ -178,7 +181,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // On mount: set screen from the current hash, then listen for changes.
   React.useEffect(() => {
     let cancelled = false
-    const stored = loadStoredSession()
+    let stored = loadStoredSession()
+    const apply = (value: StoredSession | null) => {
+      if (cancelled) return
+      latestSession.current = value
+      if (!value) {
+        clearStoredSession(); setSession(null); setMe(null)
+        setScreenState(authFlowHash(window.location.hash) ? hashToScreen(window.location.hash) : "login")
+        return
+      }
+      try { saveStoredSession(value) } catch { /* Cookie and coordinated cache remain authoritative. */ }
+      setSession((previous) => previous && previous.loginGeneration === value.loginGeneration ? previous : value)
+      setMe((previous) => previous?.userId === value.userId ? previous : {
+        userId: value.userId, role: value.role, email: null, emailVerified: false, displayName: "", disabled: false, avatar: null, serverTime: "",
+      })
+    }
+    const unsubscribe = subscribeWebAuth(apply)
     const nextScreen = hashToScreen(window.location.hash)
     const initialOAuthPending = readOAuthPendingFromUrl()
     const initialOAuthError = readOAuthErrorFromUrl()
@@ -204,6 +222,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } catch {
         // Server unreachable — fall through to normal auth flow.
       }
+      try {
+        stored = await webAuth()?.restore(stored) ?? null
+      } catch (err) {
+        let current: StoredSession | null | undefined
+        try { current = webAuth()?.current() } catch { /* A cache read fault must not become an unhandled boot rejection. */ }
+        const explicitlyEnded = err instanceof WebLoginChanged || (err instanceof WebAuthHttpError && err.status === 401)
+        stored = current ?? (!explicitlyEnded && !stored?.loginGeneration ? stored : null)
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err))
+      }
       if (initialOAuthPending) {
         setOauthPending(initialOAuthPending)
         if (!cancelled) {
@@ -219,18 +246,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
         return
       }
-      setSession(stored)
+      if (cancelled) return
+      let authority: StoredSession | null | undefined
+      try { authority = webAuth()?.current() } catch (err) {
+        setError(err instanceof Error ? err.message : String(err)); setLoading(false); return
+      }
+      if (authority?.loginGeneration && authority.loginGeneration !== stored.loginGeneration) { setLoading(false); return }
+      apply(stored)
+      setScreenState(nextScreen === "login" || nextScreen === "register" ? "app" : nextScreen)
       try {
         const currentUser = await authApi.me(stored.accessToken)
         if (cancelled) return
+        if (latestSession.current?.loginGeneration !== stored.loginGeneration) return
         setMe(currentUser)
         setScreenState(nextScreen === "login" || nextScreen === "register" ? "app" : nextScreen)
-      } catch {
-        clearStoredSession()
+      } catch (err) {
         if (cancelled) return
-        setSession(null)
-        setMe(null)
-        setScreenState(authFlowHash(window.location.hash) ? hashToScreen(window.location.hash) : "login")
+        setError(err instanceof Error ? err.message : String(err))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -241,6 +273,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener("hashchange", handler)
     return () => {
       cancelled = true
+      unsubscribe()
       window.removeEventListener("hashchange", handler)
     }
   }, [])
@@ -254,11 +287,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setScreenState(s)
   }, [])
 
+  React.useEffect(() => {
+    let active = true
+    const resume = () => {
+      if (!active || document.visibilityState === "hidden") return
+      // Reconcile Cookie identity as well as TTL, including an interrupted login.
+      void webAuth()?.restore(loadStoredSession()).catch(() => undefined)
+    }
+    const timer = setInterval(resume, 30_000)
+    window.addEventListener("online", resume)
+    document.addEventListener("visibilitychange", resume)
+    return () => { active = false; clearInterval(timer); window.removeEventListener("online", resume); document.removeEventListener("visibilitychange", resume) }
+  }, [])
+
   const finishAuth = React.useCallback(async (auth: Parameters<typeof authResponseToSession>[0]) => {
-    const nextSession = authResponseToSession(auth)
+    const coordinated = webAuth()?.current()
+    if (coordinated && (coordinated.userId !== auth.userId || (auth.sessionId && coordinated.sessionId !== auth.sessionId))) throw new WebLoginChanged()
+    const nextSession = coordinated ?? authResponseToSession(auth)
     saveStoredSession(nextSession)
+    latestSession.current = nextSession
     setSession(nextSession)
     const currentUser = await authApi.me(nextSession.accessToken)
+    if (latestSession.current?.loginGeneration !== nextSession.loginGeneration) return
     setMe(currentUser)
     setError(null)
     setOauthPending(null)
@@ -383,11 +433,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return null
     }
     const currentUser = await authApi.me(session.accessToken)
+    if (latestSession.current?.loginGeneration !== session.loginGeneration) return null
     setMe(currentUser)
     return currentUser
   }, [session?.accessToken])
 
   const signOut = React.useCallback(() => {
+    const requested = session?.loginGeneration
+    void (async () => {
+    if (requested && !await webAuth()?.signOut(requested)) return
+    if (latestSession.current && latestSession.current.loginGeneration !== requested) return
+    latestSession.current = null
     clearAuthFlow(window.sessionStorage)
     clearStoredSession()
     setSession(null)
@@ -395,7 +451,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setOauthPending(null)
     window.location.hash = "#/signed-out"
     setScreenState("signed-out")
-  }, [])
+    })().catch((err) => setError(err instanceof Error ? err.message : String(err)))
+  }, [session?.loginGeneration])
 
   return (
     <AuthContext.Provider

@@ -6,7 +6,9 @@ export function authResponseToSession(auth: AuthResponse): StoredSession {
   return {
     accessToken: auth.accessToken,
     userId: auth.userId,
-    role: auth.role
+    role: auth.role,
+    sessionId: auth.sessionId,
+    credentialVersion: auth.credentialVersion,
   };
 }
 
@@ -20,7 +22,10 @@ export function loadStoredSession(): StoredSession | null {
     return {
       accessToken: parsed.accessToken,
       userId: parsed.userId,
-      role: parsed.role
+      role: parsed.role,
+      loginGeneration: parsed.loginGeneration,
+      sessionId: parsed.sessionId,
+      credentialVersion: parsed.credentialVersion,
     };
   } catch {
     return null;
@@ -28,7 +33,8 @@ export function loadStoredSession(): StoredSession | null {
 }
 
 export function saveStoredSession(session: StoredSession): void {
-  window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  const { accessToken, userId, role, loginGeneration, sessionId, credentialVersion } = session;
+  window.localStorage.setItem(SESSION_KEY, JSON.stringify({ accessToken, userId, role, loginGeneration, sessionId, credentialVersion }));
 }
 
 export function clearStoredSession(): void {

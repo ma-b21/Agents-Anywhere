@@ -1,5 +1,5 @@
 import { ApiClient, apiClient, apiPath } from "@/lib/api";
-import { shouldAuthorizeDownloadUrl } from "@/lib/api/download-auth";
+import { browserAuthenticatedFetch } from "@/features/auth/web-auth-runtime";
 import type {
   AdminDashboardOverviewResponse,
   AdminDashboardSettings,
@@ -525,11 +525,7 @@ export class DashboardApi {
   }
 
   async downloadBlob(token: string | null, url: string): Promise<Blob> {
-    const headers: HeadersInit = {};
-    if (token && shouldAuthorizeDownloadUrl(url)) headers.authorization = `Bearer ${token}`;
-    const response = await fetch(url, {
-      headers,
-    });
+    const response = await browserAuthenticatedFetch(url, token);
     if (!response.ok) throw new Error(await response.text());
     return response.blob();
   }

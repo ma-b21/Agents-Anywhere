@@ -1,6 +1,6 @@
 # 登录凭据自动刷新：实施与测试计划
 
-日期：2026-10-12。状态：已获授权，按server → Android → Windows → Web实施，每端一个commit；每端修改、测试、独立审阅通过后提交。真实部署、设备验收和不足的测试环境单列，不冒充通过。
+日期：2026-10-12。状态：四端代码实施、可用环境测试和独立审阅已完成，按server → Android → Windows → Web各一个commit。尚未部署生产；真实PG多worker、Android APK/真机、Windows新安装包、真实服务跨TTL和七天观察仍是发布门禁，不冒充通过。
 
 ## 执行进度
 
@@ -9,9 +9,9 @@
 | 阶段 | 实施 | 测试 | 独立审阅 | commit |
 | --- | --- | --- | --- | --- |
 | server | 代码完成 | 可运行全套898通过；增补后专项218通过 | 最终复审通过；审阅者独立4项通过 | 5b20a74c |
-| Android | 完成 | Kotlin2.2 controller编译、36项JVM/HTTP/边界通过；APK/真机未验 | 最终复审通过；审阅者独立36项通过 | d5236468 |
-| Windows | 完成 | main可运行130项、Renderer321项通过；2项原有基线失败单列；类型检查/生产构建/系统加密通过 | 最终复审通过；审阅者独立31项通过 | 本阶段commit，下阶段回填hash |
-| Web | 未开始 | 未执行 | 未执行 | 待提交 |
+| Android | 完成 | Kotlin2.2 controller编译、36项JVM/HTTP/边界通过；APK/真机未验 | 最终复审通过；补充22项状态机独立复测通过 | d5236468 |
+| Windows | 完成 | main可运行130项、Renderer321项通过；补充16项专项通过；类型检查/生产构建/系统加密通过；2项基线失败单列 | 最终复审通过；补充16项独立复测通过 | eaa07abd |
+| Web | 完成 | 31项专项、9组浏览器验收通过；主代理连续4轮及独立1轮通过；全量338中335通过、3项既有基线失败；类型检查/生产构建通过 | 最终31项专项及9组浏览器独立复测通过 | 本阶段commit：fix(web): renew browser sessions across tabs |
 
 ### server可执行清单
 
@@ -29,7 +29,7 @@
 - [x] App生命周期、上传/下载、realtime最新token接入，临时故障不退出。
 - [x] 单元/集成、可用构建和真机验收记录；独立审阅复测后提交Android commit。
 
-Android阶段记录：项目同版Kotlin2.2编译API/模型/会话与realtime controller依赖图通过（未改动DevicesController底部纯映射抽取为本地编译fixture，排除Android UI和不相关AppUpdates，不等价完整APK）。状态机22项、真实localhost HTTP9项、controller存储异常边界5项通过，覆盖20请求单飞、持久化attempt、丢响应/重启恢复、写盘失败、旧401、认证仅一次重试、业务网络错误不重放、切账号/host保护、撤销、取消、legacy升级与降级、0TTL恢复、退出。离线Gradle已启动并解析项目，因本机无Android SDK停止；不把纯逻辑测试记为APK/Keystore/Compose验收。终端重连、前台定时续领及图片预览已接入认证通道。首轮独立审阅发现host错配、SharedPreferences先改内存后写盘、64代旧token淘汰、错误通知阻塞future等边界，已加严格上下文、原子读取、durable write barrier、fingerprint识别和必完成future，并补回归；图片/备份隔离同步收尾，最终复审通过，审阅者独立重跑36项全通过；APK/Compose/Keystore/真机仍是发布前门禁。
+Android阶段记录：项目同版Kotlin2.2编译API/模型/会话与realtime controller依赖图通过（未改动DevicesController底部纯映射抽取为本地编译fixture，排除Android UI和不相关AppUpdates，不等价完整APK）。状态机22项、真实localhost HTTP9项、controller存储异常边界5项通过，覆盖20请求单飞、持久化attempt、丢响应/重启恢复、写盘失败、旧401、认证仅一次重试、业务网络错误不重放、切账号/host保护、撤销、取消、legacy升级与降级、0TTL恢复、退出。离线Gradle已启动并解析项目，因本机无Android SDK停止；不把纯逻辑测试记为APK/Keystore/Compose验收。终端重连、前台定时续领及图片预览已接入认证通道。首轮独立审阅发现host错配、SharedPreferences先改内存后写盘、64代旧token淘汰、错误通知阻塞future等边界，已加严格上下文、原子读取、durable write barrier、fingerprint识别和必完成future，并补回归；图片/备份隔离同步收尾，最终复审通过，首轮审阅者独立重跑35项全通过，随后22项状态机增补独立复测亦通过（见跨端补充审阅）；APK/Compose/Keystore/真机仍是发布前门禁。
 
 ### Windows可执行清单
 
@@ -37,23 +37,27 @@ Android阶段记录：项目同版Kotlin2.2编译API/模型/会话与realtime co
 - [x] Renderer请求/登录状态、代理/上传下载/realtime最新token接入（待独立审阅与复测）。
 - [x] 主进程/Renderer测试、typecheck/build、系统加密与安装包未验记录；独立审阅复测后提交Windows commit。
 
-Windows阶段记录：新增15项主进程协调器/存储/代理测试、3项终端重连测试、5项真实AuthProvider组件测试通过，覆盖20请求单飞、持久attempt及丢响应重启恢复、两处写盘失败、晚到401、网络不重放、退出/切号/错host保护、70代旧闭包、legacy升级、multipart重试、取消等待者、离线启动、同generation不拆实时连接及迟到退出成功不清新账号。main可运行130项通过；既有backend-client.test在未改源码/测试/protocol下单跑仍有ERR_IPC_CHANNEL_CLOSED，独立审阅者也复现，未算通过。Renderer322项中321通过，既有task-composer-preferences在未改new-session-content/测试中以LF结束标记匹配CRLF失败，未改测试冒充通过。Main/Renderer类型检查和静态生产构建通过；隔离userData下实际Windows safeStorage加密/解密通过，无真实凭据读取。首次审阅发现退出回调迟到清新账号UI，已加同步latestSession fencing和组件回归，最终复审通过；审阅者独立重跑31项专项全通过。未构建/安装新的NSIS exe、未接真实服务做跨TTL续登或多窗口实机验收，仍作为发布门禁。
+Windows阶段记录：新增16项主进程协调器/存储/代理测试、3项终端重连测试、5项真实AuthProvider组件测试通过，覆盖20请求单飞、持久attempt及丢响应重启恢复、两处写盘失败、晚到401、网络不重放、退出/切号/错host保护、70代旧闭包、legacy升级、multipart重试、取消等待者、离线启动、同generation不拆实时连接及迟到退出成功不清新账号。首轮main可运行130项通过；既有backend-client.test在未改源码/测试/protocol下单跑仍有ERR_IPC_CHANNEL_CLOSED，独立审阅者也复现，未算通过。Renderer322项中321通过，既有task-composer-preferences在未改new-session-content/测试中以LF结束标记匹配CRLF失败，未改测试冒充通过。Main/Renderer类型检查和静态生产构建通过；隔离userData下实际Windows safeStorage加密/解密通过，无真实凭据读取。首次审阅发现退出回调迟到清新账号UI，已加同步latestSession fencing和组件回归，最终复审通过；审阅者独立重跑31项专项全通过。未构建/安装新的NSIS exe、未接真实服务做跨TTL续登或多窗口实机验收，仍作为发布门禁。
+
+跨端补充审阅：三端普通业务第二次401迟到时均核对被拒绝token与credentialVersion，避免清掉并发换发的新凭据；Android检查与撤销标记在同一synchronized临界区。Windows16项主进程专项、Android22项状态机独立复测通过，补充修复已纳入本轮各端自有且未推送的原提交（因此hash更新），没有增加跨端混合commit；工作区文件和用户其他未提交改动保持不变。Android另9项HTTP及5项存储边界复跑通过，合计36项。
 
 ### Web可执行清单
 
-- [ ] Cookie/CSRF bootstrap、登录完整会话、失效分类与legacy升级。
-- [ ] 页内/跨标签协调、凭据版本保护、请求一次认证重试、实时连接。
-- [ ] Cookie/CSRF/乱序/跨标签测试，typecheck/build和可用E2E；审阅复测后提交Web commit。
+- [x] Cookie/CSRF bootstrap、登录完整会话、失效分类与legacy升级。
+- [x] 页内/跨标签协调、凭据版本保护、请求一次认证重试、实时连接。
+- [x] Cookie/CSRF/乱序/跨标签测试、typecheck/build和隔离浏览器E2E；最终独立审阅复测通过，随Web commit提交（真实服务部署仍未验）。
+
+Web阶段记录：新增23项协调器、3项终端重连、5项真实AuthProvider回归通过。页内单飞、Web Locks将Cookie身份变更与共享快照提交串行化，BroadcastChannel/storage事件只发无凭据通知，localStorage仅缓存access白名单与持久身份修订/退出tombstone。前台/online/visibility检查Cookie身份与TTL；同generation刷新不拆实时连接；JSON/FormData、下载/代理、ticket与终端重连通过新token通道；外部URL不带bearer并禁止重定向。首轮独立审阅发现第二401迟到清新token、恢复晚于退出、空→登录→退出复活、boot catch退回旧mirror及legacy冷却，已补保护和回归；新增旧mirror跨tombstone禁止重新导入。Headless Chromium通过9组隔离真实模块验收：三标签60并发跨八天fake clock只一次刷新，Cookie HttpOnly/仅Cookie恢复、JSON/FormData认证最多一次重试、业务响应丢失不重放、断网跨TTL恢复、切号fencing/旧logout、第二401终止、无锁策略。测试fixture仅127.0.0.1假账号/假Cookie，不等价真实server端联调或真实七天观察。全量首轮336项中333通过、3失败；git archive HEAD隔离基线重跑同样复现onboarding/privacy的Next CJS module hook错误和composer CRLF结束标记失败，未改旧测试/第三方依赖掩盖。TypeScript和最终生产构建通过，最后增量包含legacy mirror跨退出tombstone禁止再导入及持续缓存读错结束loading，独立31专项最终复审通过。最终全量338项中335通过、3项同基线失败；生产构建再次通过。浏览器fixture已将alias/relative URL统一为.ts，避免测试中重复singleton，并增加Windows退出时假服务显式shutdown；修正后主代理连续4轮、独立审阅者1轮，各9组全通过；确认测试端口已释放。
 
 执行记录：测试环境使用仓库server/.venv与独立缓存。首次uv命令继承活跃Connector环境并误移除其依赖，已按应用自带uv.lock恢复依赖与editable链接；Connector/SDK导入及沙箱命令恢复正常，未读改登录凭据和应用配置。后续不再使用隐式UV_PROJECT_ENVIRONMENT。
 
-服务端验证记录（进行中）：首轮全套874通过、16跳过，发现2个迁移识别/历史fixture问题，已修复；新增限流曾违反服务层依赖规则，已去掉FastAPI依赖。Windows缺psutil/tzdata已补入独立测试环境。符号链接测试因WinError1314权限失败、协议工件字节比对因现有CRLF checkout失败，单列为环境/基线限制，未改写这些测试来冒充通过。独立审阅发现Connector入口漏校验、legacy WS关联、PG logout竞争和pending登录授权撤销4项，已增补实现及回归测试，等待复测/复审。PG实库/跨worker集成、生产部署及真机验收仍未执行。
+服务端验证过程记录（下段已闭环）：首轮全套874通过、16跳过，发现2个迁移识别/历史fixture问题，已修复；新增限流曾违反服务层依赖规则，已去掉FastAPI依赖。Windows缺psutil/tzdata已补入独立测试环境。符号链接测试因WinError1314权限失败、协议工件字节比对因现有CRLF checkout失败，单列为环境/基线限制，未改写这些测试来冒充通过。独立审阅发现Connector入口漏校验、legacy WS关联、PG logout竞争和pending登录授权撤销4项，已增补实现及回归测试，等待复测/复审。PG实库/跨worker集成、生产部署及真机验收仍未执行。
 
 服务端收尾结果：修复后可运行全量898 passed、16 skipped、2 deselected（另15项静态符号链接测试文件因权限未跑）；随后增补授权签发/profile竞态，最终认证+新会话+迁移+WS+架构+两种终端专项218 passed。Ruff F/I scoped check通过（既有star import的F403/F405不作为此次全仓lint通过）；独立审阅首轮问题及后续epoch竞态均闭环，审阅者独立focused 4 passed。SQLite迁移升级/降级、20同attempt并发、Redis跨实例限流通过；真实PG多worker、生产部署仍是发布前门禁。
 
 ## 1. 结论与目标
 
-当前七天后退出登录的根因是固定有效期 access token，没有完整的刷新链路。Android 虽保存了扫码登录返回的 refresh token，但服务端没有可用的用户登录刷新入口，客户端也没有自动换发逻辑。
+实施前的问题：七天后退出登录的根因是固定有效期 access token，没有完整的刷新链路。Android 虽保存了扫码登录返回的 refresh token，但当时服务端没有可用的用户登录刷新入口，客户端也没有自动换发逻辑。本文上方执行记录为本轮实现后的实际状态。
 
 目标：Android、Windows、Web 在有效登录会话内自动续领 access token；连续使用不再因 access token 的七天有效期被踢出。账号被禁用、主动退出、凭据被撤销、长期不使用或达到配置的会话上限时，仍需要重新登录。
 
@@ -318,7 +322,9 @@ Android加测扫码/授权码、进程死亡、后台跨access TTL回前台、Ke
 
 ### 10.4 构建和实际验收
 
-以下是未来验收入口，本轮不执行；实施时核对仓库脚本：
+Web专项可复跑：在web-next目录使用Node22执行 `node --experimental-strip-types --test test/web-auth-coordinator.test.mjs test/web-auth-session.test.mjs test/authenticated-socket.test.mjs`。浏览器脚本为test/browser-auth-check.py，服务fixture为test/fixtures/auth-refresh-server.mjs；先启动Node假服务，再用安装了Playwright/Chromium的Python运行脚本，或用with_server.py管理启动。假服务仅127.0.0.1:5389，脚本finally显式shutdown，不读真实Cookie/生产配置。八天fake clock只推进前端时间，不推进真实浏览器Cookie过期时间；Cookie Secure/跨站限制和真实服务期限需要另验。
+
+以下是标准验证入口；本轮已执行与未执行结果以上方阶段记录为准，不将缺失环境/真实设备门禁记为通过：
 
 - server：uv run pytest tests/test_auth.py，再跑新增refresh/WS/全套；PG单独配置测试库。
 - desktop-workbench：corepack yarn test:main、corepack yarn typecheck、corepack yarn renderer:typecheck；Renderer用corepack yarn workspace agents-anywhere-desktop-renderer test，整体corepack yarn build；最后corepack yarn dist:win，装exe验OAuth/续登/会话与文件操作。
@@ -352,5 +358,3 @@ E2E：各端登录 → 持续超过短access TTL的任务 → 不切会话观察
 4. 旧安装：接受有效会话自动升级、过期重登一次，还是另做旧扫码refresh单次迁移？建议前者。
 
 建议先P0/P1/P2和服务端故障注入，再Android；不要三端先发刷新，最后补服务端和会话策略。
-
-跨端补充复审：Android与Windows已补第二次业务401迟到时按被拒绝token与credentialVersion条件撤销，避免清掉已并发换发的新凭据。Android22项状态机、Windows16项主进程专项独立复测通过；旧第二401真正失效测试仍通过。各端原有发布前门禁不变。

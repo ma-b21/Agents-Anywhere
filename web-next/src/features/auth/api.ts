@@ -50,13 +50,12 @@ export class AuthApi {
         ? await this.loginPasswordVerifier(email, credentials.password)
         : undefined);
 
-    return this.client.post<AuthResponse>(
+    return this.client.signIn<AuthResponse>(
       "/auth/login",
       {
         email,
         passwordVerifier
       },
-      { auth: false },
     );
   }
 
@@ -72,7 +71,7 @@ export class AuthApi {
           ? await createPasswordVerifier(credentials.password)
           : undefined;
 
-    return this.client.post<AuthResponse>(
+    return this.client.signIn<AuthResponse>(
       "/auth/register",
       {
         email,
@@ -81,7 +80,6 @@ export class AuthApi {
         ...(verifier ?? {}),
         ...(credentials.setupToken ? { setupToken: credentials.setupToken } : {})
       },
-      { auth: false },
     );
   }
 
@@ -121,10 +119,9 @@ export class AuthApi {
       }
     }
 
-    return this.client.post<OAuthFinalizeResponse>(
+    return this.client.signIn<OAuthFinalizeResponse>(
       "/auth/oauth/finalize",
       body,
-      { auth: false },
     );
   }
 
