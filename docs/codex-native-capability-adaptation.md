@@ -287,8 +287,8 @@ Web 验证记录：对 Web 自身源码运行同组 33 项新增测试，33/33 �
 | Connector | 修复与终态清理保护完成 | 39 项目标回归通过；3 项关键测试旧实现先失败；Ruff（生产文件及新 registry 测试）、diff-check 通过；独立审阅及复审通过 | `abe17016` |
 | Android | 旧失败通知兼容完成；错误转入现有非阻塞卡片展示 | 真实通知类／发送策略 JUnit 13/13；旧实现 4 项新测试先失败；独立审阅通过；Gradle 因缺少 Android SDK 未完成 | `4a00fc5d` |
 | Windows | 共用通知阻塞判断兼容完成；按钮、Enter、实际提交入口一致 | 47 项目标回归通过；旧实现 7 项先失败；TypeScript 通过；全量 335/336（仅既有偏好断言失败）；独立审阅通过 | `e3395010` |
-| Web | 自身通知判断兼容完成，无 Electron 接口变更 | 47 项目标回归通过；旧实现 7 项先失败；TypeScript 通过；全量 349/352，三项失败均在隔离旧源码复现；独立审阅通过 | 本阶段单独提交 |
-| Windows 安装包 | 待最终提交后隔离构建 | 待验证 | 不推送／不自动安装 |
+| Web | 自身通知判断兼容完成，无 Electron 接口变更 | 47 项目标回归通过；旧实现 7 项先失败；TypeScript 通过；全量 349/352，三项失败均在隔离旧源码复现；独立审阅通过 | `54b5bb7c` |
+| Windows 安装包 | 从代码提交 `54b5bb7c` 隔离构建完成 | 主进程／renderer TypeScript、Webpack 静态导出、NSIS x64、包内源码一致性及无界面模块检查通过 | 未签名；不推送／不自动安装 |
 
 Connector 验证边界：使用 conda 3.13、最低支持 SDK 0.144.4 与已有隔离依赖，测试数据另设 `.cache/connector-turn-failure-validation-20261013`。覆盖两种失败事件、发送能力恢复、下一轮启动与审批、后续完成关闭旧错误、连续不同 turn 错误及其他通知保护。没有连接真实 Codex／生产服务；重复与迟到终态事件的既有并发行为不在本轮扩展范围。
 
@@ -297,3 +297,7 @@ Android 验证边界：实际 `RuntimeNotice`、相关通知 action 类型及两
 Windows 验证边界：测试从实际源码 AST 提取通知策略与提交函数，并运行真实 React／jsdom 输入组件；覆盖点击、Enter、错误后普通发送、恢复通知、并存审批、发送忙碌、离线、只读、停止中及失败 steer 重试语义。恢复测试为状态切换／快照模型，不是完整 SessionDetail 或真实网络端到端。全量剩余失败为既有 `task-composer-preferences.test.mjs` 的 `missing end marker: return (` 断言，未修改该测试。服务端 `SessionRunService.send_message` 已核对：按状态与能力校验，不另外依据历史失败 notice 拦截，因此本轮不改服务端。
 
 Web 验证边界：使用自身已安装的 Next 16.4.0 依赖，不修改声明或锁文件。全量三项既有失败分别为 onboarding、privacy-policy 在 Node 22 加载 Next navigation 时的 `Cannot read properties of undefined (reading 'exports')`，以及同一偏好源码标记断言；使用 `git archive HEAD web-next` 的隔离旧源码及相同依赖逐项复现。目标回归和类型检查通过；独立审阅另复跑增量相关测试 37/37。恢复测试仍是状态／快照模型，未做生产部署或真实网络验收。
+
+Windows 发布记录：仅归档提交 `54b5bb7c` 的 desktop-workbench、connector 与 logo；复用上一包固定锁和 uv 0.11.26，Node 22.21.1、Yarn 4.6.0、Next 16.2.10、Electron 39.8.10、electron-builder 26.16.1，未混入其他未提交修改。静态产物及 app.asar 已确认包含窄范围 execution_error 兼容规则；包内两处错误通知生产文件及 steer SDK 文件均与归档、提交源码一致。包内主入口／页面存在，生产 dist 不带应用测试或 development-login；用打包后的 Electron 以 Node 模式加载鉴权、API proxy、日志模块通过。不启动 GUI／Connector，不安装，真实安装和自托管服务端到端尚待验收。
+
+安装包纯文本路径：`D:\Agents-Anywhere\.cache\windows-release-54b5bb7c-20261013\desktop-workbench\release\Agents Anywhere Setup 2.0.0.exe`。文件大小 296849037 字节；SHA256：`2ac3b00b5bae9114355acaa7cffb25bde3e2ddf9442e9e2ed36c0008b712d22c`。旧安装包保留。覆盖安装前应完全退出旧客户端。
