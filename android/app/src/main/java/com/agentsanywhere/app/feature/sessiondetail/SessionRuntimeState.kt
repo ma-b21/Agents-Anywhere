@@ -178,7 +178,11 @@ data class RuntimeNotice(
     }
 
     fun blocksSession(sessionId: String): Boolean =
-        blocking?.scope == "session" && blocking.targetId == sessionId
+        blocking?.scope == "session" && blocking.targetId == sessionId &&
+            // Older Connectors marked terminal, non-actionable failures as blocking.
+            // Keep them visible while preserving genuine approval/input blocking.
+            !(type == "interaction" && interactionType == "execution_error" &&
+                !responseRequired && actions.isEmpty())
 
     private companion object {
         val RESPONDABLE_NOTICE_STATUSES = setOf("open", "failed")
