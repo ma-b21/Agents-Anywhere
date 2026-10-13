@@ -2870,6 +2870,10 @@ function blockingInteractions(notices: Notice[], sessionId: string): Notice[] {
 }
 
 function isSessionBlockingInteraction(notice: Notice, sessionId: string): boolean {
+  // Older Connectors marked terminal, non-actionable failures as blocking.
+  // Keep the error visible without bypassing real approvals or input requests.
+  if (notice.type === "interaction" && notice.interactionType === "execution_error" &&
+    notice.responseRequired === false && notice.actions?.length === 0) return false
   return notice.blocking?.scope === "session" && notice.blocking.targetId === sessionId
 }
 

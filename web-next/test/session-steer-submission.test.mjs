@@ -4,6 +4,7 @@ import { createRequire } from "node:module"
 import test from "node:test"
 import vm from "node:vm"
 import ts from "typescript"
+import { legacyFailure } from "./helpers/notice-policy.mjs"
 
 const require = createRequire(import.meta.url)
 const compilerOptions = { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
@@ -48,7 +49,7 @@ const fixture = ts.transpileModule(`${prefix.getText(ast)}\n${helpers}\nfunction
 const plain = value => JSON.parse(JSON.stringify(value))
 const file = { id: "local-1", name: "note.txt", type: "file", size: 3, mediaType: "text/plain", uploaded: { fileId: "file-1", name: "note.txt" } }
 
-function harness({ status = "running", api = {}, value = "follow up" } = {}) {
+function harness({ status = "running", api = {}, value = "follow up", notices = [] } = {}) {
   const entries = new Map()
   const storage = {
     getItem: key => entries.get(key) ?? null,
@@ -68,7 +69,7 @@ function harness({ status = "running", api = {}, value = "follow up" } = {}) {
   let currentState = {
     session: { id: "s1", runtime: "codex", status, connectorStatus: "online", takeover: true, archived: false, updatedSeq: 1 },
     state: { status, selections: { model: "old-model", permission: "old-permission" }, metadata: {} },
-    notices: [], items: [], nextSeq: 1,
+    notices, items: [], nextSeq: 1,
   }
   let draft = { sessionId: "s1", value }
   let nextId = 0
@@ -123,6 +124,30 @@ function deferred() {
   const promise = new Promise((ok, fail) => { resolve = ok; reject = fail })
   return { promise, resolve, reject }
 }
+
+test("error-state ordinary send reaches API despite historical non-actionable failure", async () => {
+  const h = harness({ status: "error", notices: [legacyFailure()] })
+  assert.equal(await h.send("continue", [], {}, "send"), true)
+  assert.deepEqual(h.calls.api.map(call => call.method), ["sendSessionMessage"])
+  assert.deepEqual(h.calls.sending, [true, false])
+  assert.equal(h.messageInFlightRef.current.size, 0)
+})
+
+test("real submit guard still rejects approval and actionable errors after turn failure", async () => {
+  for (const patch of [{ interactionType: "approval" }, { interactionType: "input_request" }, { responseRequired: true }, { actions: [{ actionId: "retry" }] }]) {
+    const h = harness({ status: "error", notices: [legacyFailure(), { ...legacyFailure(), ...patch }] })
+    assert.equal(await h.send("continue", [], {}, "send"), false)
+    assert.deepEqual(h.calls.api, [])
+  }
+})
+
+test("failed steer retry is not converted to send when turn fails with an old notice", async () => {
+  const h = harness({ notices: [legacyFailure()], api: { steerSessionMessage: async () => { throw new Error("turn failed") } } })
+  assert.equal(await h.send("follow up", [], {}, "steer"), false)
+  h.setStatus("error")
+  assert.equal(await h.send("follow up", [], {}, "send"), false)
+  assert.deepEqual(h.calls.api.map(call => call.method), ["steerSessionMessage"])
+})
 
 test("running steer uses only steer API, preserves running and skips selection patches", async () => {
   const pending = deferred()
