@@ -245,3 +245,21 @@ Web 验证记录：对 Web 自身源码运行同组 33 项新增测试，33/33 �
 附件边界：Windows/Web 当前页面内失败会保留附件；原有附件 hook 在切换会话或重载后不恢复浏览器 File 对象。本轮不新增跨会话附件恢复；保存的重试文件 ID 与当前附件不匹配时拒绝复用旧请求，需用户重新编辑草稿，不静默丢附件重发。
 
 发布前仍需在真实 Connector／自托管服务及三端完成运行中追加、停止、失败重试、会话切换及重连验证；代码测试通过不等同于已完成真机端到端验收。
+
+### 9.1 Steer 回显重复消息补修（2026-10-13）
+
+用户反馈 Windows 中 steer 成功后，正式时间线已有一条消息，底部仍保留同文临时消息；后续发送不会清理，重启后才消失。
+
+根因：项目最低支持的 `openai-codex==0.144.4` 中，高层 `AsyncTurnHandle.steer(input)` 没有透传 `clientUserMessageId`，而正式回显使用普通 `userMessage`。Connector 对无 ID 的 steer 仅允许专用 `steeringUserMessage` 文本回退，导致普通回显缺少平台 `clientMessageId`，客户端无法替换或清理内存中的 optimistic 消息。
+
+修复：仅调整 `connector/connector/runtimes/codex/sdk/client.py` 的 steer 调用。带 ID 的请求初始化 SDK 后，通过现有底层 `request` 封装发送生成类型 `TurnSteerParams`，完整保留 `threadId`、`expectedTurnId`、`clientUserMessageId` 和原始输入，使用 `TurnSteerResponse` 校验响应。缺少底层接口时明确失败，不静默丢 ID 或重发；不带 ID 的旧调用保持原高层路径。消息匹配继续以准确 ID 为准，不放宽历史同文消息匹配；服务端和三端 UI 不改，依赖声明不变。
+
+验证完成：
+
+- 新增 10 项 Connector 回归用例全部通过，覆盖 ID 透传、延迟初始化、拒绝后不重发、缺少接口、无 ID 兼容、普通／原生 SDK 回显、相同文字的连续 steer、回显乱序、重复事件、快照恢复和历史消息保护。4 个关键 SDK 回归用例在旧实现下均失败，在新实现下通过。
+- 扩大验证 SDK、Codex runtime、incremental reads、recovery simulation、provider 五组测试：240 项中 232 通过、7 失败、1 跳过。对旧 steer 实现运行原有用例，得到相同的 7 项失败：2 项 SDK Unix 可执行文件测试、1 项附件 `/` 路径断言、4 项 provider 的 Unix 可执行文件／符号链接／Windows 路径大小写断言；未修改这些基线测试。
+- Windows 已有 33 项 steer 策略、API、React 输入组件及提交测试全部通过。额外直接执行实际 timeline 合并与 workspace 缓存清理函数，确认正式回显替换临时消息、两条同文 steer 不互相覆盖、后续发送不再残留底部临时消息，历史同文消息不会误删。
+- 最终 steer 专项 14/14 通过，`git diff --check` 通过。生产 SDK 文件与 SDK 测试的 Ruff 检查通过；runtime 测试文件存在一项原有 `I001`（旧恢复测试内 import 分组），已对旧源码确认同样失败，不混入格式修复。
+- Python 使用 conda 3.13，SDK 固定为最低支持版本 0.144.4 并安装在 `.cache/connector-steer-validation-20261013`，其他依赖只读复用已有测试环境；测试数据与附件均配置到该隔离目录。不使用正在运行的 Connector venv，不连接生产服务，不修改依赖版本。
+
+状态：源码修复、本地回归和提交前独立子代理审阅完成，未发现阻塞提交的问题；本次将单独提交 Connector 修复、两组回归测试及本文档，并从提交版本隔离构建 Windows 安装包，不混入工作区其他修改、不推送远程。实际安装的 Connector 需要升级后才生效；新安装包生成后仍需在真实应用中验收连续同文 steer、后续新消息、会话切换与重连，确认底部临时消息不再残留。

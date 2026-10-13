@@ -24,6 +24,8 @@ from openai_codex.generated.v2_all import (
     ThreadSortKey,
     ThreadStartParams,
     TurnStartParams,
+    TurnSteerParams,
+    TurnSteerResponse,
     UserInput,
     WorkspaceWriteSandboxPolicy,
 )
@@ -433,7 +435,32 @@ class CodexSdkClient:
             thread_id=request.thread_id,
             turn_id=request.turn_id,
         )
-        result = await turn.steer(request.content)
+        if request.client_message_id:
+            await ensure_codex_initialized(self._client)
+            low_level_client = getattr(self._client, "_client", None)
+            send_request = getattr(low_level_client, "request", None)
+            if not callable(send_request):
+                raise RuntimeInvalidRequestError(
+                    "Codex low-level client is required to preserve a steering message ID"
+                )
+            # AsyncTurnHandle.steer() drops clientUserMessageId. Use the typed
+            # protocol request so a normal userMessage echo resolves the exact
+            # optimistic message, including repeated identical steering text.
+            params = TurnSteerParams(
+                threadId=request.thread_id,
+                expectedTurnId=request.turn_id,
+                clientUserMessageId=request.client_message_id,
+                input=[
+                    UserInput(root=TextUserInput(type="text", text=request.content))
+                ],
+            )
+            result = await send_request(
+                "turn/steer",
+                params.model_dump(mode="json", by_alias=True, exclude_none=True),
+                response_model=TurnSteerResponse,
+            )
+        else:
+            result = await turn.steer(request.content)
         payload = turn_action_result(result) or turn_ref(turn)
         return CodexTurnResult(turn_id=id_of(turn), payload=payload)
 

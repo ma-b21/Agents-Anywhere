@@ -5504,6 +5504,109 @@ def test_codex_runtime_tags_live_steer_echo_with_client_message_id() -> None:
     asyncio.run(_test_codex_runtime_tags_live_steer_echo_with_client_message_id())
 
 
+@pytest.mark.parametrize("typed_echo", [False, True])
+def test_codex_runtime_resolves_normal_user_message_steer_echo(typed_echo: bool) -> None:
+    async def run() -> None:
+        host = FakeHost()
+        runtime = CodexRuntime(config=_config(), host=host, client=FakeCodexClient())
+        await runtime.start_turn("sess_1", "thread_1", "start")
+        text = "same steering text"
+        for client_id in ("cm_steer_1", "cm_steer_2"):
+            await runtime.steer_turn(
+                "sess_1", "thread_1", text, client_message_id=client_id
+            )
+
+        # Deliberately echo in the opposite order: identity, not text or pending
+        # queue order, must choose which optimistic message gets resolved.
+        for client_id in ("cm_steer_2", "cm_steer_1"):
+            raw_item = {
+                "id": f"native_{client_id}",
+                "type": "userMessage",
+                "clientId": client_id,
+                "content": [{"type": "text", "text": text}],
+            }
+            params = {
+                "threadId": "thread_1",
+                "turnId": "turn_new",
+                "completedAtMs": 1,
+                "item": raw_item,
+            }
+            if typed_echo:
+                message = CodexSdkEvent.from_value(
+                    Notification(
+                        method="item/completed",
+                        payload=ItemCompletedNotification.model_validate(params),
+                    )
+                )
+            else:
+                message = {"method": "item/completed", "params": params}
+
+            await runtime._handle_notification(message)
+            item = host.timeline_item_upserts[-1]
+            assert item.id == client_message_item_id("thread_1", client_id)
+            assert item.source["clientMessageId"] == client_id
+            assert item.source["rawType"] == "userMessage"
+
+            await runtime._handle_notification(message)
+            assert host.timeline_item_upserts[-1].id == item.id
+            assert host.timeline_item_upserts[-1].source["clientMessageId"] == client_id
+
+        assert runtime._pending_messages._pending == []
+
+        # A recovered snapshot must retain the bindings after the live echoes.
+        accumulator = CodexTimelineAccumulator(
+            pending_messages=runtime._pending_messages
+        )
+        snapshot = accumulator.items_from_snapshot_projections(
+            session_id="sess_1",
+            external_session_id="thread_1",
+            projections=tuple(
+                CodexTimelineProjection(
+                    native_id=f"native_{client_id}",
+                    raw_type="userMessage",
+                    role="user",
+                    turn_id="turn_new",
+                    text=text,
+                )
+                for client_id in ("cm_steer_1", "cm_steer_2")
+            ),
+        )
+        assert [item.source["clientMessageId"] for item in snapshot] == [
+            "cm_steer_1",
+            "cm_steer_2",
+        ]
+        assert len({item.id for item in snapshot}) == 2
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("turn_id", ["turn_active", "turn_old", None])
+def test_codex_steer_does_not_match_unidentified_same_text_history(
+    turn_id: str | None,
+) -> None:
+    registry = PendingClientMessageRegistry("conn_test")
+    registry.register(
+        external_session_id="thread_1",
+        client_message_id="cm_steer_1",
+        text="same text",
+        steering=True,
+        turn_id="turn_active",
+    )
+
+    match = registry.attach_to_item(
+        external_session_id="thread_1",
+        native_item_id="historical_user_item",
+        client_message_id=None,
+        raw_type="userMessage",
+        role="user",
+        text="same text",
+        turn_id=turn_id,
+    )
+
+    assert match is None
+    assert len(registry._pending) == 1
+
+
 async def _test_codex_runtime_tags_live_steer_echo_with_client_message_id() -> None:
     client = FakeCodexClient()
     host = FakeHost()
