@@ -425,6 +425,140 @@ def test_codex_sdk_client_uses_low_level_permission_payloads() -> None:
     asyncio.run(_test_codex_sdk_client_uses_low_level_permission_payloads())
 
 
+def test_codex_sdk_client_preserves_steering_message_id() -> None:
+    async def run() -> None:
+        native = _FakeLowLevelAsyncCodex()
+        client = CodexSdkClient(native)
+        turn = _FakeTurn("turn_active")
+        client._remember_turn("thread_active", turn)
+        content = "追加说明\n\n[Attached file: note.txt]"
+
+        result = await client.steer_turn(
+            CodexSteerTurnRequest(
+                thread_id="thread_active",
+                turn_id="turn_active",
+                content=content,
+                client_message_id="msg_steer_1",
+            )
+        )
+
+        assert native.initialized is True
+        assert native.low_level.raw_requests == [
+            (
+                "turn/steer",
+                {
+                    "threadId": "thread_active",
+                    "expectedTurnId": "turn_active",
+                    "clientUserMessageId": "msg_steer_1",
+                    "input": [{"type": "text", "text": content, "text_elements": []}],
+                },
+            )
+        ]
+        assert result.turn_id == "turn_active"
+        assert result.payload == {"turnId": "turn_active"}
+        assert turn.steer_inputs == []
+
+    asyncio.run(run())
+
+
+def test_codex_sdk_client_initializes_before_detecting_steer_transport() -> None:
+    class LazyNative:
+        def __init__(self) -> None:
+            self._client = None
+
+        async def _ensure_initialized(self) -> None:
+            self._client = _FakeLowLevelClient()
+
+    async def run() -> None:
+        native = LazyNative()
+        client = CodexSdkClient(native)
+        turn = _FakeTurn("turn_active")
+        client._remember_turn("thread_active", turn)
+
+        await client.steer_turn(
+            CodexSteerTurnRequest(
+                thread_id="thread_active",
+                turn_id="turn_active",
+                content="more",
+                client_message_id="msg_steer_1",
+            )
+        )
+
+        assert native._client.raw_requests[0][1]["clientUserMessageId"] == "msg_steer_1"
+        assert turn.steer_inputs == []
+
+    asyncio.run(run())
+
+
+def test_codex_sdk_client_does_not_retry_rejected_steer_without_message_id() -> None:
+    async def run() -> None:
+        native = _FakeLowLevelAsyncCodex()
+        client = CodexSdkClient(native)
+        turn = _FakeTurn("turn_active")
+        client._remember_turn("thread_active", turn)
+
+        async def reject(method: str, params: dict[str, Any], **kwargs: Any) -> Any:
+            native.low_level.raw_requests.append((method, params))
+            raise RuntimeInvalidRequestError("active turn ended")
+
+        native.low_level.request = reject
+        with pytest.raises(RuntimeInvalidRequestError, match="active turn ended"):
+            await client.steer_turn(
+                CodexSteerTurnRequest(
+                    thread_id="thread_active",
+                    turn_id="turn_active",
+                    content="more",
+                    client_message_id="msg_steer_1",
+                )
+            )
+
+        assert len(native.low_level.raw_requests) == 1
+        assert turn.steer_inputs == []
+
+    asyncio.run(run())
+
+
+def test_codex_sdk_client_rejects_steer_if_message_id_would_be_lost() -> None:
+    async def run() -> None:
+        native = _FakeAsyncCodex()
+        client = CodexSdkClient(native)
+        turn = _FakeTurn("turn_active")
+        client._remember_turn("thread_active", turn)
+
+        with pytest.raises(
+            RuntimeInvalidRequestError, match="preserve a steering message ID"
+        ):
+            await client.steer_turn(
+                CodexSteerTurnRequest(
+                    thread_id="thread_active",
+                    turn_id="turn_active",
+                    content="more",
+                    client_message_id="msg_steer_1",
+                )
+            )
+        assert turn.steer_inputs == []
+
+    asyncio.run(run())
+
+
+def test_codex_sdk_client_keeps_idless_steer_compatibility() -> None:
+    async def run() -> None:
+        client = CodexSdkClient(_FakeAsyncCodex())
+        turn = _FakeTurn("turn_active")
+        client._remember_turn("thread_active", turn)
+
+        result = await client.steer_turn(
+            CodexSteerTurnRequest(
+                thread_id="thread_active", turn_id="turn_active", content="more"
+            )
+        )
+
+        assert result.turn_id == "turn_active"
+        assert turn.steer_inputs == ["more"]
+
+    asyncio.run(run())
+
+
 def test_codex_sdk_client_resumes_thread_before_low_level_turn_start() -> None:
     asyncio.run(_test_codex_sdk_client_resumes_thread_before_low_level_turn_start())
 
@@ -985,6 +1119,8 @@ class _FakeLowLevelClient:
         response_model: Any,
     ) -> Any:
         self.raw_requests.append((method, dict(params)))
+        if method == "turn/steer":
+            return response_model.model_validate({"turnId": params["expectedTurnId"]})
         if method == "thread/unsubscribe":
             return response_model.model_validate({"status": self.unsubscribe_status})
         if method == "thread/read":
@@ -1185,9 +1321,10 @@ class _FakeThread:
 class _FakeTurn:
     def __init__(self, turn_id: str = "turn_sdk") -> None:
         self.id = turn_id
+        self.steer_inputs: list[Any] = []
 
     async def steer(self, input: Any) -> _FakeModelDump:
-        _ = input
+        self.steer_inputs.append(input)
         return _FakeModelDump({"turnId": self.id})
 
     async def interrupt(self) -> dict[str, Any]:
