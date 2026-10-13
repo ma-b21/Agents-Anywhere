@@ -82,7 +82,16 @@ class CodexNoticeRegistry:
         source: str,
     ) -> tuple[SessionNotice, ...]:
         closed: list[SessionNotice] = []
-        for notice in tuple(self.open_blocking_for_session(session_id)):
+        for notice in self.current_for_session(session_id):
+            informational_failure = (
+                notice.interaction_type == "execution_error"
+                and not notice.response_required
+                and not notice.actions
+            )
+            if notice.status not in {"open", "responding"} or (
+                notice.blocking is None and not informational_failure
+            ):
+                continue
             next_notice = self.transition(
                 notice.notice_id,
                 status=status,

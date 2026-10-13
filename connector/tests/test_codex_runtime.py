@@ -4943,11 +4943,11 @@ async def _test_codex_runtime_interrupted_and_cancelled_turns_set_idle() -> None
     ]
 
 
-def test_codex_runtime_failed_turn_creates_blocking_error_notice() -> None:
-    asyncio.run(_test_codex_runtime_failed_turn_creates_blocking_error_notice())
+def test_codex_runtime_failed_turn_creates_nonblocking_error_notice() -> None:
+    asyncio.run(_test_codex_runtime_failed_turn_creates_nonblocking_error_notice())
 
 
-async def _test_codex_runtime_failed_turn_creates_blocking_error_notice() -> None:
+async def _test_codex_runtime_failed_turn_creates_nonblocking_error_notice() -> None:
     host = FakeHost()
     runtime = CodexRuntime(config=_config(), host=host, client=FakeCodexClient())
 
@@ -4972,7 +4972,11 @@ async def _test_codex_runtime_failed_turn_creates_blocking_error_notice() -> Non
     assert notice.type == "interaction"
     assert notice.interaction_type == "execution_error"
     assert notice.severity == "error"
-    assert notice.blocking == {"scope": "session", "targetId": "sess_1"}
+    assert notice.blocking is None
+    assert notice.response_required is False
+    assert notice.actions == ()
+    assert notice.message == "Exploded"
+    assert notice.source["turnId"] == "turn_new"
     assert host.turn_ends[-1]["outcome"] == "failed"
     assert host.state_updates[-1]["status"] == "idle"
     assert interrupt.ok is True
@@ -5017,6 +5021,98 @@ async def _test_codex_runtime_native_failed_completion_sets_error_state() -> Non
     )
     assert error_update["error"]["code"] == "native_failure"
     assert error_update["error"]["message"] == "Native turn failed"
+
+
+@pytest.mark.parametrize("method", ["turn/failed", "turn/completed"])
+def test_codex_runtime_failed_turn_allows_next_turn_and_preserves_approvals(
+    method: str,
+) -> None:
+    asyncio.run(_failed_turn_allows_next_turn_and_preserves_approvals(method))
+
+
+async def _failed_turn_allows_next_turn_and_preserves_approvals(method: str) -> None:
+    host = FakeHost()
+    runtime = CodexRuntime(config=_config(), host=host, client=FakeCodexClient())
+    await runtime.start_turn("sess_1", "thread_1", "first")
+
+    async def approval(approval_id: str) -> None:
+        await runtime._handle_notification(
+            {
+                "id": approval_id,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "platformSessionId": "sess_1",
+                    "threadId": "thread_1",
+                    "turnId": "turn_new",
+                    "itemId": approval_id,
+                    "approvalId": approval_id,
+                    "command": "echo hello",
+                },
+            }
+        )
+
+    await approval("before_failure")
+    params = {
+        "platformSessionId": "sess_1",
+        "threadId": "thread_1",
+        "turnId": "turn_new",
+        "error": {"code": "boom", "message": "Exploded"},
+    }
+    if method == "turn/completed":
+        params["turn"] = {"id": "turn_new", "status": "failed", "items": []}
+    await runtime._handle_notification({"method": method, "params": params})
+
+    error_notice = host.notice_upserts[-1]
+    assert error_notice.interaction_type == "execution_error"
+    assert error_notice.status == "open"
+    assert error_notice.blocking is None
+    assert error_notice.response_required is False
+    assert error_notice.actions == ()
+    assert host.state_updates[-1]["status"] == "error"
+    assert host.turn_ends[-1]["outcome"] == "failed"
+    closed_approval = next(
+        notice
+        for notice in reversed(host.notice_upserts)
+        if notice.notice_id == "notice_approval_before_failure"
+    )
+    assert closed_approval.status == "closed"
+    assert closed_approval.blocking is None
+
+    capabilities = await runtime.get_session_capabilities("sess_1", "thread_1")
+    send = next(
+        capability
+        for capability in capabilities.capabilities
+        if capability.capability_id == CAPABILITY_SESSION_SEND_MESSAGE
+    )
+    assert send.available is True
+    assert (await runtime.start_turn("sess_1", "thread_1", "continue")).ok is True
+    assert host.state_updates[-1]["status"] == "running"
+    await approval("after_failure")
+    assert host.notice_upserts[-1].blocking == {
+        "scope": "session",
+        "targetId": "sess_1",
+    }
+    assert host.notice_upserts[-1].response_required is True
+    assert host.notice_upserts[-1].actions
+    assert host.state_updates[-1]["status"] == "waiting_approval"
+    await runtime._handle_notification(
+        {
+            "method": "turn/completed",
+            "params": {
+                "platformSessionId": "sess_1",
+                "threadId": "thread_1",
+                "turnId": "turn_new",
+            },
+        }
+    )
+    previous_error = next(
+        notice
+        for notice in reversed(host.notice_upserts)
+        if notice.notice_id == error_notice.notice_id
+    )
+    assert previous_error.status == "closed"
+    assert previous_error.blocking is None
+    assert host.state_updates[-1]["status"] == "idle"
 
 
 def test_codex_runtime_tags_completed_user_echo_with_client_message_id() -> None:

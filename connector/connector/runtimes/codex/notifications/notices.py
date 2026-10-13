@@ -77,7 +77,7 @@ class CodexNoticeHandler:
         reason: str,
         source: str,
     ) -> None:
-        """Close currently open blocking notices for a terminal turn.
+        """Close blocking notices and prior execution errors for a terminal turn.
 
         Side effects:
         - mutates the Codex notice registry
@@ -113,7 +113,9 @@ class CodexNoticeHandler:
             severity="error",
             status="open",
             interaction_type="execution_error",
-            blocking={"scope": "session", "targetId": session_id},
+            # A terminal failure is informational, not an unanswered approval.
+            # Keep the error visible without preventing the next user message.
+            blocking=None,
             response_required=False,
             actions=(),
             source={
