@@ -6,6 +6,7 @@ import vm from "node:vm"
 import React, { act } from "react"
 import { JSDOM } from "jsdom"
 import ts from "typescript"
+import { blockingNotices, legacyFailure } from "./helpers/notice-policy.mjs"
 
 const require = createRequire(import.meta.url)
 const { window } = new JSDOM("<!doctype html><html><body></body></html>")
@@ -123,6 +124,56 @@ function deferred() {
   const promise = new Promise(done => { resolve = done })
   return { promise, resolve }
 }
+
+test("turn failure with a legacy notice permits both click and Enter ordinary send", async t => {
+  for (const useKeyboard of [false, true]) {
+    const ui = await mount(t, {
+      runtimeState: { status: "error", metadata: {}, selections: {} },
+      effectiveCapabilities: capabilities(["session.send_message"]),
+      pendingInteractionCount: blockingNotices([legacyFailure()]).length,
+    })
+    assert.equal(ui.sendButton().disabled, false)
+    await act(() => useKeyboard ? ui.key() : ui.sendButton().click())
+    assert.equal(ui.calls.send.length, 1)
+    assert.equal(ui.calls.send[0][3], "send")
+  }
+})
+
+test("failed turn still cannot send during approval, busy, offline or read-only state", async t => {
+  const ui = await mount(t, {
+    runtimeState: { status: "error", metadata: {}, selections: {} },
+    effectiveCapabilities: capabilities(["session.send_message"]),
+  })
+  const session = { id: "s1", runtime: "codex", connectorStatus: "online", takeover: true, status: "error" }
+  const approval = { ...legacyFailure(), interactionType: "approval", responseRequired: true }
+  for (const patch of [
+    { pendingInteractionCount: blockingNotices([legacyFailure(), approval]).length },
+    { pendingInteractionCount: 0, sending: true },
+    { sending: false, interrupting: true },
+    { interrupting: false, session: { ...session, connectorStatus: "offline" } },
+    { session: { ...session, takeover: false } },
+    { session, runtimeState: { status: "stopping", metadata: {}, selections: {} } },
+  ]) {
+    await ui.update(patch)
+    assert.equal(ui.sendButton().disabled, true)
+    await act(() => { ui.sendButton().click(); ui.key() })
+    assert.equal(ui.calls.send.length, 0)
+  }
+})
+
+test("returning to error-state session with restored failure notice leaves sending enabled", async t => {
+  const ui = await mount(t)
+  await ui.update({ session: { id: "s2", runtime: "codex", connectorStatus: "online", takeover: true, status: "idle" } })
+  await ui.update({
+    session: { id: "s1", runtime: "codex", connectorStatus: "online", takeover: true, status: "error" },
+    runtimeState: { status: "error", metadata: {}, selections: {} },
+    effectiveCapabilities: capabilities(["session.send_message"]),
+    pendingInteractionCount: blockingNotices(JSON.parse(JSON.stringify([legacyFailure()]))).length,
+  })
+  assert.equal(ui.sendButton().disabled, false)
+  await act(() => ui.key())
+  assert.equal(ui.calls.send[0][3], "send")
+})
 
 test("running steer button submits the real composer action while keeping Stop separate", async t => {
   const ui = await mount(t)
