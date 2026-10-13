@@ -510,3 +510,36 @@ private fun rememberAttachmentImageRequest(
     }
     return request.value
 }
+
+@Composable
+private fun ImageLoadingPlaceholder(modifier: Modifier) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .shimmer()
+            .background(Color(0x22000000)),
+    )
+}
+
+@Composable
+private fun ImageFallback(
+    name: String,
+    fallbackColor: Color,
+    modifier: Modifier,
+) {
+    Box(
+        modifier = modifier.background(Color(0x22000000)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = name,
+            color = fallbackColor,
+            fontSize = 12.sp,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(10.dp),
+        )
+    }
+}
+
+private fun Double.formatOneDecimal(): String = String.format("%.1f", this)
